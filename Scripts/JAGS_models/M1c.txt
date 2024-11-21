@@ -1,0 +1,20 @@
+# model 1c: 4 parameters, fixed beta
+model{
+
+    # Likelihood model
+    for(i in 1:n){
+    	xobs[i] ~ dnorm(x[i], tau)
+	yobs[i] ~ dnorm(y[i], tau)
+    	y[i] <- a + x[i]
+    	x[i] ~ dnorm(mu_x, tau_x)
+    }
+
+    # Priors
+    tau_x ~ dgamma(1, 0.001)
+    tau ~ dgamma(1, 0.001)
+         
+    a ~ dnorm(0, 1/pow(sd, 2))
+    mu_x ~ dnorm(mean, 1/pow(sd, 2))
+    mean <- max / 6
+    sd  <- max / 3
+}

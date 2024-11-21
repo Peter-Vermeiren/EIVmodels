@@ -1,0 +1,22 @@
+# model 1a: 6 parameters, complete model structure
+model{
+
+    # Likelihood model
+    for(i in 1:n){
+    	xobs[i] ~ dnorm(x[i], tau_u)
+	yobs[i] ~ dnorm(y[i], tau_y)
+    	y[i] <- a + b*x[i]
+    	x[i] ~ dnorm(mu_x, tau_x)
+    }
+
+    # Priors
+    tau_u ~ dgamma(1, 0.001)
+    tau_x ~ dgamma(1, 0.001)
+    tau_y ~ dgamma(1, 0.001)
+     
+    a ~ dnorm(0, 1/pow(sd, 2))
+    b ~ dnorm(1, 1/pow(10, 2))
+    mu_x ~ dnorm(mean, 1/pow(sd, 2))
+    mean <- max / 6
+    sd  <- max / 3
+}

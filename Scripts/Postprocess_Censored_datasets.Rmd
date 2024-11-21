@@ -1,0 +1,737 @@
+---
+title: "Postprocessing JAGS model runs"
+output: html_document
+---
+
+Here we post process the model runs regarding analysis 2, which aimed at applying
+the Bayesian EIV model to datasets including censored values
+
+
+```{r Setup, include=FALSE}
+
+## script setup
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# note: r version  4.3.2
+
+# clear work environment
+rm(list=ls())
+
+# directories
+dir.data <- "../Data/"
+dir.modelruns <- "../Model runs/"
+dir.output <- "../Output/"
+
+# packages
+library(dplyr)     # version 1.1.4
+library(ggplot2)   # version 3.5.1
+library(GGally)    # version 2.2.1
+library(coda)      # version 0.19-4
+library(rjags)     # version 4-15
+library(R2jags)    # version 0.7-1
+library(gridExtra) # version 2.3
+library(ggmcmc)    # version 1.5.1.1
+
+source("helper_functions/Get_samplesize.R")
+source("helper_functions/Get_posteriordf.R")
+source("helper_functions/Plot_trace.R")
+source("helper_functions/Get_summary.R")
+
+# for reproducibility
+set.seed(418)
+
+# plotting preferences
+My_Theme  <- theme(
+  title = element_text(size = 16),
+  axis.title.x = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.title.y = element_text(size = 16),
+  axis.text.y = element_text(size = 14),
+  legend.title = element_text(size = 12),
+  legend.text = element_text(size = 10),
+  strip.text = element_text(size = 16))
+
+nine_col <- c("#6FBFCF", "#9BBADD", "#3B74B3",
+              "#E69F00", "#D55E00", "#E69F80", 
+              "#009E73", "#009E90", "#009E60")
+dens_col <- c("#3B74B3", "#E69F00","#009E73",
+              "#9BBADD", "#D55E00","#009E90",
+              "#6FBFCF", "#E69F80","#009E60") 
+                
+                
+```
+
+
+
+```{r LoadRuns, include=FALSE}
+
+## load Jags model runs + identify model
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# uncensored version
+load(paste0(dir.modelruns, "runs_M1b_2024-11-21.RData"))
+Jagsout_orig <- JagsM1b
+modelname_orig <- "M1b"
+
+# censored versions
+# Y censored
+load(paste0(dir.modelruns, "runs_M1b_cens_Y_2024-11-21.RData"))
+Jagsout_Y <- list()
+Jagsout_Y[[1]] <- JagsM1b_cens_Y
+modelname_Y <- "M1b_cens_Y"
+
+# X censored
+load(paste0(dir.modelruns, "runs_M1b_cens_X_2024-11-21.RData"))
+Jagsout_X <- list()
+Jagsout_X[[1]] <- JagsM1b_cens_X
+modelname_X <- "M1b_cens_X"
+
+# X and Y censored
+load(paste0(dir.modelruns, "runs_M1b_cens_XY_2024-11-21.RData"))
+Jagsout_XY <- list()
+Jagsout_XY[[1]] <- JagsM1b_cens_XY
+modelname_XY <- "M1b_cens_XY"
+
+```
+
+
+```{r GetPost, include=FALSE}
+# get posterior samples
+
+# uncensored version
+post_df_orig <- Get_posteriordf(jags_outputs = Jagsout_orig,
+                                modelname = modelname_orig)
+
+# censored versions
+# Y censored
+post_df_Y <- Get_posteriordf(jags_outputs = Jagsout_Y,
+                                modelname = modelname_Y)
+# X censored
+post_df_X <- Get_posteriordf(jags_outputs = Jagsout_X,
+                                modelname = modelname_X)
+# X and Y censored
+post_df_XY <- Get_posteriordf(jags_outputs = Jagsout_XY,
+                                modelname = modelname_XY)
+
+```
+
+```{r Chaindiagnostics, echo = FALSE}
+
+# Some evaluation of the censored model run 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+## Y censored ~~~~~~~~~~~~~~
+# effective sample size
+SSz_dt_cens_Y <- Get_samplesize(jags_outputs = Jagsout_Y)
+round(SSz_dt_cens_Y,2)
+# traceplots
+Plot_trace(samples = post_df_Y,
+           file = paste0(dir.output, "traceplots_", modelname_Y, "_", Sys.Date(),".png"))
+
+## X censored ~~~~~~~~~~~~~~
+# effective sample size
+SSz_dt_cens_X <- Get_samplesize(jags_outputs = Jagsout_X)
+round(SSz_dt_cens_X,2)
+# traceplots
+Plot_trace(samples = post_df_X,
+           file = paste0(dir.output, "traceplots_", modelname_X, "_", Sys.Date(),".png"))
+
+
+## X and Y censored ~~~~~~~~~~~~~~
+# effective sample size
+SSz_dt_cens_XY <- Get_samplesize(jags_outputs = Jagsout_XY)
+round(SSz_dt_cens_XY,2)
+# traceplots
+Plot_trace(samples = post_df_XY,
+           file = paste0(dir.output, "traceplots_", modelname_XY, "_", Sys.Date(),".png"))
+
+
+```
+
+
+```{r CreatePriors, echo = FALSE, fig.height = 7, fig.width = 7, fig.align = "center"}
+## create priors
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+prior_max <- Jagsout_orig[[1]]$model$data()[["max"]]
+
+# a ~ dnorm(0, 1/pow(max/3, 2))
+a <- rnorm(n = 500000, mean = 0, sd = prior_max/3)
+a <- as.data.frame(a)
+
+# b ~ dnorm(1, 1/pow(0.1, 2))
+b <- rnorm(n = 500000, mean = 1, sd = 10)
+b <- as.data.frame(b)
+
+# mu_x ~ dnorm( max / 6 , 1 / (max / 3) ^2)
+mu_x <- rnorm(n = 500000, mean = prior_max/6, sd = prior_max/3 )
+mu_x <- as.data.frame(mu_x)
+
+# tau ~ dgamma(1, 0.001) - idem for tau_x
+tau <- rgamma(n = 500000, shape = 1, rate = 0.001)
+tau <- as.data.frame(tau)
+tau_x <- tau
+
+# collect all
+prior <- list(a, b, tau, mu_x, tau_x)
+names(prior) <- c("a", "b", "tau", "mu_x", "tau_x")
+
+# put in dataframe
+prior_df <- data.frame(a = prior$a,
+                       b = prior$b,
+                       tau = prior$tau,
+                       mu_x = prior$mu_x,
+                       taux = prior$tau_x)
+colnames(prior_df) <- c("a", "b", "tau", "mu_x", "tau_x")
+```
+
+
+```{r PriorPosteriorPlot, echo = FALSE, fig.height = 7, fig.width = 7, fig.align = "center"}
+
+## Prior - Posterior distribution plots, incl original posterior
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Posterior distribution (colored histograms)
+# Prior distribution (red line).
+
+# list to store all plots
+plots <- list()
+
+# get parameters
+params <- Jagsout_orig[[1]]$parameters.to.save
+if(any(params %in% "deviance")){params <- params[-which(params=="deviance")]}
+
+# plot each parameter
+for(i in 1:length(params)){
+
+  # get data
+  # priors
+  priordata <- prior[[params[i]]]
+  colnames(priordata)[1] <-  c("parameter")
+  # posteriors of the original (uncensored) model run
+  plotdata_orig <- post_df_orig[,c(params[i], "CV", "chain")]
+  colnames(plotdata_orig)[1] <- c("parameter")
+  plotdata_orig$run <- "uncensored run"
+  # posteriors of the censored model run in Y
+  plotdata_censY <- post_df_Y[,c(params[i], "CV", "chain")]
+  colnames(plotdata_censY)[1] <- c("parameter")
+  plotdata_censY$run <- "censored Y run"
+  # posteriors of the censored model run in X
+  plotdata_censX <- post_df_X[,c(params[i], "CV", "chain")]
+  colnames(plotdata_censX)[1] <- c("parameter")
+  plotdata_censX$run <- "censored X run"
+  # posteriors of the censored model run in X and Y
+  plotdata_censXY <- post_df_XY[,c(params[i], "CV", "chain")]
+  colnames(plotdata_censXY)[1] <- c("parameter")
+  plotdata_censXY$run <- "censored XY run"
+  # bind together the original and censored posterior data
+  plotdata <- rbind(plotdata_orig, 
+                    plotdata_censY, plotdata_censY, # plotdata 2ce because the other data are actually also everything 2ce (during 3-fold CV)
+                    plotdata_censX, plotdata_censX,
+                    plotdata_censXY, plotdata_censXY)
+  plotdata$run <- as.factor(plotdata$run)
+  
+  # # get min-max
+  # min <- floor(min(plotdata$parameter))
+  # max <- ceiling(max(plotdata$parameter))
+  
+  # plot data
+  plot_colors <- dens_col <- c("#3B74B3", "#E69F00","#009E73","grey20")
+  p <- ggplot(data = plotdata, aes(x = parameter)) +
+    geom_histogram(aes(fill = run),
+                   position = "identity", alpha = 0.7, bins = 500) +
+    # geom_density(aes(parameter, 
+    #              color = run), linewidth = 1.2) +
+    scale_fill_manual(values = plot_colors) +
+    geom_density(data = priordata,
+                 aes(parameter),
+                 color = "tomato", linewidth = 1.2) +
+    # xlim(min, max) +
+    xlim(min(plotdata$parameter), max(plotdata$parameter)) +
+    labs(x = params[i],  
+         y="Density",
+         fill = "model run") +
+    theme_classic() +
+    My_Theme
+  
+  # only add legend to one plot
+  if(i == 5){
+    p <- p + theme(
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 13))
+  }else{
+    p <- p + theme(legend.position = "none")
+  }
+  
+  # add to list of plots
+  plots[[i]] <- p
+  
+}
+
+file <- paste0(dir.output, "Pri-PostPlot-censored-runs-", Sys.Date(),".png")
+png(file = file,
+    res = 300, units = "cm", width = 35,height = 22)
+grid.arrange(grobs = list(plots[[1]], plots[[2]],
+             plots[[3]],  plots[[4]],
+             plots[[5]]), 
+            # widths = c(1,1,1),
+             layout_matrix = rbind(c(1,1,2,2,3,3),
+                                   c(4,4,5,5,5, NA)))
+dev.off()
+
+```
+
+
+
+```{r PosteriorCorrelationPlot, echo = FALSE, fig.height = 7, fig.width = 7, fig.align = "center"}
+
+## Posterior correlation plot
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# combined different runs
+post_df_orig$run <- "uncens"
+post_df_Y$run <- "cens Y"
+post_df_X$run <- "cens X"
+post_df_XY$run <- "cens XY"
+plotdata <- rbind(post_df_orig, 
+                    post_df_Y, 
+                    post_df_X,
+                  post_df_XY)
+plotdata$run <- as.factor(plotdata$run)
+# get parameters
+params <- Jagsout_Y[[1]]$parameters.to.save
+params <- params[-which(params == "deviance")]
+# prepare plot
+png(filename = paste0(dir.output, "/ParamCor-censoredruns-", Sys.Date(),".png"),
+    res = 300, units = "cm",width = 26, height = 26)
+# plot
+plot_colors <- dens_col <- c("#3B74B3", "#E69F00","#009E73","grey20")
+ggpairs(plotdata[ , c(params, "run")],
+          # upper = list(continuous = "density"),
+          mapping=ggplot2::aes(colour = plotdata$run),
+          upper = list(continuous = wrap("cor", method = "spearman")),
+          lower = list(continuous = wrap("points", alpha = 0.3))) +
+     scale_colour_manual(values = plot_colors) +
+       scale_fill_manual(values = plot_colors) +
+    theme_classic()
+dev.off()
+
+```
+
+
+```{r Param_summary, include=FALSE}
+
+## parameter summary data
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# for posteriors
+get_summary(post_df_Y)
+get_summary(post_df_X)
+get_summary(post_df_XY)
+
+# for prior
+round(apply(prior_df[, params], 2, quantile, probs = c(0.025, 0.5, 0.975)), 2)
+
+```
+
+
+
+
+```{r ReadData, include=FALSE}
+
+## read & prepare observed data
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+## complete uncensored data
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# read data
+df <- read.csv(file = paste0(dir.data, "dataset_1a.csv"))
+dim(df)
+
+# prepare
+df_noncens <- df %>%  
+  mutate(log10_Mother = log10(Mother_concentration)) %>%          
+  mutate(log10_Offspring = log10(Offspring_concentration))
+dim(df_noncens)
+
+# compound classes
+df_noncens$compound_class_broad <- as.factor(df_noncens$compound_class_broad)
+cbp1 <- c("#E69F00", "#009E73", "#CC79A7","#56B4E9", "#000000",
+           "#D55E00","#CC79A7", "#F0E442", "#0072B2",  "#009E73")
+
+
+
+## censored data
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# uncensored version
+load("../Model runs/datasets_censored_2024-11-21.RData")
+# this loads datasets_censored 
+names(datasets_censored)
+
+```
+
+
+## Predictions of censored model
+
+```{r Predictions_censored}
+
+# Note: this chunk takes time
+
+## make predictions for whole dataset with particular interest in censored part
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+predict_M5 <- function(posterior_df, prediction_df, censoring_dir){
+  
+  cat("predicting with model M5: progress:")
+  
+  # for each X in test set
+  for(i in 1:nrow(prediction_df)){
+    
+    # counter
+    if(i %% 20 == 0){ cat(round(i/nrow(prediction_df) *100, 0),  "%\n") }
+    
+    # we use mother as x values 
+    if(censoring_dir %in% c("X", "XY")){ # if we predict from X, and X is censored, we can only predict starting from the LOD
+      if(prediction_df[i, "censored_X_YN"] == 0){ 
+        xi <- prediction_df[i, "log10_Mother"] # if not censored, take real value
+      }else{
+        xi <- prediction_df[i, "LOD_X"] # if censored, calculate at LOD
+      }
+    }else{
+      xi <- prediction_df[i, "log10_Mother"] 
+    }
+    
+    # predict Yi from Xi 
+    yi  <- posterior_df[ , "a"] + posterior_df[ , "b"] * xi
+    
+    # derive Yobs
+    Yobs <- NULL
+    for(j in 1:nrow(posterior_df)){ # for each posterior draw
+      Yobs[j] <- rnorm(n = 1, 
+                       mean = yi[j], 
+                       sd = sqrt(1/posterior_df[j , "tau"]))
+    }
+    
+    # derive Xobs
+    Xobs <- NULL
+    for(j in 1:nrow(posterior_df)){ # for each posterior draw
+      if(censoring_dir %in% c("X", "XY")){ 
+        Xobs[j] <- xi
+      }else{
+        Xobs[j] <- rnorm(n = 1, 
+                         mean = xi, 
+                         sd = sqrt(1/posterior_df[j , "tau"]))
+      }
+    }
+    
+    # save results
+    prediction_df[i, "Yobs_median"] <- quantile(Yobs, probs = c(0.5))
+    prediction_df[i, "Yobs_lower"] <- quantile(Yobs, probs = c(0.025))
+    prediction_df[i, "Yobs_upper"] <- quantile(Yobs, probs = c(0.925))  
+    prediction_df[i, "Xobs_median"] <- quantile(Xobs, probs = c(0.5))
+    prediction_df[i, "Xobs_lower"] <- quantile(Xobs, probs = c(0.025))
+    prediction_df[i, "Xobs_upper"] <- quantile(Xobs, probs = c(0.925))  
+  
+  }
+  
+  return(prediction_df)
+}
+
+# predictions for uncensored data ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+df_complete <- predict_M5(posterior_df = post_df_orig,
+           prediction_df = df_noncens,
+           censoring_dir = "none") # c("none", "X", "Y", "XY")
+
+head(df_complete[, c("log10_Mother", "log10_Offspring", 
+                 "Yobs_median", "Yobs_lower", "Yobs_upper",
+                 "Xobs_median", "Xobs_lower","Xobs_upper")])
+
+# predictions for Y censored data  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+df_complete_Y <- predict_M5(posterior_df = post_df_Y,
+           prediction_df = datasets_censored$Ycens,
+           censoring_dir = "Y") # c("none", "X", "Y", "XY")
+
+head(df_complete_Y[, c("log10_Mother", "log10_Offspring", "censored_Y_YN",
+                 "LOD_Y", "Yobs",
+                 "Yobs_median", "Yobs_lower", "Yobs_upper",
+                 "Xobs_median", "Xobs_lower","Xobs_upper")])
+
+# predictions for X censored data  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+df_complete_X <- predict_M5(posterior_df = post_df_X,
+           prediction_df = datasets_censored$Xcens,
+           censoring_dir = "X") # c("none", "X", "Y", "XY")
+
+head(df_complete_X[, c("log10_Mother", "log10_Offspring", "censored_X_YN",
+                 "LOD_X", "Xobs",
+                 "Yobs_median", "Yobs_lower", "Yobs_upper",
+                 "Xobs_median", "Xobs_lower","Xobs_upper")])
+
+
+# predictions for X and Y censored data  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+df_complete_XY <- predict_M5(posterior_df = post_df_XY,
+           prediction_df = datasets_censored$XYcens,
+           censoring_dir = "XY") # c("none", "X", "Y", "XY")
+
+head(df_complete_XY[, c("log10_Mother", "log10_Offspring", "censored_Y_YN", "censored_X_YN",
+                 "LOD_Y", "Yobs", "LOD_X", "Xobs",
+                 "Yobs_median", "Yobs_lower", "Yobs_upper",
+                 "Xobs_median", "Xobs_lower","Xobs_upper")])
+
+```
+
+
+```{r PPC_censored}
+
+# Posterior predictive check (PPC)
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# uncensored data ~~~~~~~~~~~~~~~~
+# Posterior predictive check if log10_offspring is within lower-upper bound
+df_complete <- df_complete %>%
+  mutate(PPC_color = ifelse(log10_Offspring >= Yobs_lower & log10_Offspring <= Yobs_upper, TRUE, FALSE)) 
+# sort the data, so that a line can be drawn
+df_complete <- df_complete[order(df_complete$log10_Mother, decreasing = TRUE),]
+
+# Y censored data ~~~~~~~~~~~~~~~~
+# Posterior predictive check if log10_offspring is within lower-upper bound
+df_complete_Y <- df_complete_Y %>%
+  mutate(PPC_color = ifelse(log10_Offspring >= Yobs_lower & log10_Offspring <= Yobs_upper, TRUE, FALSE)) 
+# sort the data, so that a line can be drawn
+df_complete_Y <- df_complete_Y[order(df_complete_Y$log10_Mother, decreasing = TRUE),]
+
+# X censored data ~~~~~~~~~~~~~~~~
+# Posterior predictive check if log10_offspring is within lower-upper bound
+df_complete_X <- df_complete_X %>%
+  mutate(PPC_color = ifelse(log10_Offspring >= Yobs_lower & log10_Offspring <= Yobs_upper, TRUE, FALSE)) 
+# sort the data, so that a line can be drawn
+df_complete_X <- df_complete_X[order(df_complete_X$log10_Mother, decreasing = TRUE),]
+
+# XY censored data ~~~~~~~~~~~~~~~~
+# Posterior predictive check if log10_offspring is within lower-upper bound
+df_complete_XY <- df_complete_XY %>%
+  mutate(PPC_color = ifelse(log10_Offspring >= Yobs_lower & log10_Offspring <= Yobs_upper, TRUE, FALSE)) 
+# sort the data, so that a line can be drawn
+df_complete_XY <- df_complete_XY[order(df_complete_XY$log10_Mother, decreasing = TRUE),]
+
+
+# get LODs
+cut_Y <- max(datasets_censored$Ycens$LOD_Y)
+cut_X <- max(datasets_censored$Xcens$LOD_X)
+df_complete <- df_complete %>% 
+  mutate(cens_type = case_when(log10_Mother < cut_X & log10_Offspring < cut_Y ~ "both",
+                            log10_Mother < cut_X & log10_Offspring >= cut_Y ~ "X only",
+                            log10_Mother >= cut_X & log10_Offspring < cut_Y ~ "Y only",
+                         log10_Mother >= cut_X & log10_Offspring >= cut_Y ~ "none"))
+
+# some preparation of the "cens_type" variable
+df_complete$cens_type <- as.factor(df_complete$cens_type)
+df_complete$cens_type <- factor(df_complete$cens_type,
+                                levels = c("none", "X only", "Y only", "both"))
+
+
+# PPC plot
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+p <- ggplot() +
+  geom_ribbon(aes(x = log10_Mother, ymax = Yobs_upper, ymin = Yobs_lower),
+              data = df_complete, 
+              fill = alpha("grey70",0.8)) +
+  geom_ribbon(aes(x = log10_Mother, ymax = Yobs_upper, ymin = Yobs_lower),
+              data = df_complete_Y, 
+              fill = alpha("#E69F00",0.3)) +
+  geom_ribbon(aes(x = log10_Mother, ymax = Yobs_upper, ymin = Yobs_lower),
+              data = df_complete_X[-which(df_complete_X$censored_X_YN == 1), ], # cannot predict beyond LOD when X is censored
+              fill = alpha("#009E73",0.3)) +
+  geom_ribbon(aes(x = log10_Mother, ymax = Yobs_upper, ymin = Yobs_lower),
+              data = df_complete_XY[-which(df_complete_XY$censored_X_YN == 1), ], # cannot predict beyond LOD when X is censored
+              fill = alpha("#3B74B3",0.3)) +
+  # data
+  geom_point(aes(x = log10_Mother,
+                 y = log10_Offspring, 
+                 color = cens_type),
+             data = df_complete) +
+  scale_color_manual(values = c("black",  "#009E73", "#E69F00","#3B74B3")) +
+  # LOD cutoff
+  geom_hline(aes(yintercept = cut_Y),
+             col = "grey30", lwd = 0.6, lty = "dashed") +
+  # LOD cutoff
+  geom_vline(aes(xintercept = cut_X),
+             col = "grey30", lwd = 0.6, lty = "dashed") +
+  # cosmetics
+  labs(x = expression("Log10 Mother"),
+       y = expression("Log10 Offspring"), 
+       color = "Censoring") + 
+  # prediction median model
+  geom_abline(intercept = -0.33, slope = 1.14, 
+              linewidth = 1.2, color = "black") +
+  geom_abline(intercept = -0.37, slope = 1.16, 
+              linewidth = 1.2, color = "#E69F00") +
+  geom_segment(aes(x = cut_X, xend = 3.0,
+                   y = -0.29 + 1.11*cut_X, 
+                   yend =-0.29 + 1.11*3.0),
+               linewidth = 1.2, color = "#009E73") +
+  geom_segment(aes(x = cut_X, xend = 3.0,
+                   y = -0.32 + 1.13*cut_X, 
+                   yend =-0.32 + 1.13*3.0),
+               linewidth = 1.2, color = "#3B74B3") +
+  # cosmetics
+  scale_x_continuous(limits=c(-0.2, 3.0), expand = c(0, 0)) +
+  scale_y_continuous(limits=c(-1.0, 3.5), expand = c(0, 0)) +
+  theme_bw() + 
+  theme(legend.position = c(0.85, 0.20))  +
+  My_Theme
+
+
+png(filename = paste0(dir.output, "MTerrapin_censored_PPC_", Sys.Date(), ".png"),
+    res = 300, units = "cm", width = 17, height = 16)
+p
+dev.off()
+
+
+# PPC in table output 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# here we only calculate PPC for actual observed values (>LOD)
+
+# Y censored data ~~~~~~~~~~~~~~~~
+PPC_table <- df_complete_Y %>%
+  filter(censored_Y_YN  == 0) %>% # look only at actual observed values
+  count(PPC_color) %>%
+  mutate(percent = n/sum(n)*100)
+PPC_table
+
+# X censored data ~~~~~~~~~~~~~~~~
+PPC_table <- df_complete_X %>%
+  filter(censored_X_YN  == 0) %>% # look only at actual observed values
+  count(PPC_color) %>%
+  mutate(percent = n/sum(n)*100)
+PPC_table
+
+
+# X censored data ~~~~~~~~~~~~~~~~
+PPC_table <- df_complete_XY %>%
+  filter(cens_type  == "none") %>% # look only at actual observed values
+  count(PPC_color) %>%
+  mutate(percent = n/sum(n)*100)
+PPC_table
+```
+
+
+
+```{r GOFmeasures_external}
+
+# Goodness of Fit measures - to non-censored data
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+get_GOF <- function(data,  censoring_dir, type, outlier_ind){
+  
+  GOF <- list(Rsquared = c(),
+              NSE = c(),
+              nRMSE = c())
+  
+  if(type == "uncens"){  
+    # for uncensored data ~~~~~~~~~~~~~
+    # identify uncensored data
+    if(censoring_dir == "Y"){
+      ind <- which(data$censored_Y_YN ==0)
+    }else{
+      if(censoring_dir == "X"){
+        ind <- which(data$censored_X_YN ==0)
+      }else{
+        if(censoring_dir == "XY"){
+          ind <- which(data$cens_type == "none")
+        }
+      }
+    }
+  }else if(type == "cens"){   
+    # for censored  ~~~~~~~~~~~~~~~~~~
+    # identify censored data
+    if(censoring_dir == "Y"){
+      ind <- which(data$censored_Y_YN == 1)
+      cut <- max(data$LOD_Y)
+    }else if(censoring_dir == "X"){
+      ind <- which(data$censored_X_YN == 1)
+      cut <- max(data$LOD_X)
+    }else if(censoring_dir == "XY"){ # identify which are censored in y
+      ind <- which(data$cens_type == "Y only")
+      cut <- max(data$LOD_Y)
+    }
+  }
+ 
+  # get observed and predicted offspring concentrations
+  obs <- data[ind, "log10_Offspring"]
+  pred <- data[ind, "Yobs_median"]
+  
+  # residual plot 
+  res <- obs - pred
+  plot(res)
+  abline(h=0)
+  
+  # GOFs
+  # 1. predictive Pearson R2 
+  GOF$Rsquared <- cor(obs, pred, method = "pearson")
+  # 2. Nash-Sutcliffe coefficient of Efficiency (NSE) 
+  GOF$NSE <- 1 - ( sum( (obs-pred)^2 ) / sum( (obs-mean(obs))^2 ) )
+  #  3. Root Mean Squared Error of prediction
+  GOF$nRMSE <- (sqrt( sum( (obs - pred)^2 ) / length(obs))) * 1 / mean(obs)
+  
+  # additional analysis for censored data
+  if(type == "cens"){
+    
+    n_cens <- nrow(data[ind, ])
+    if(censoring_dir == "Y"){
+      # nr. > LOD
+      above_LOD <- length(which(data[ind, "Yobs_median"] >= cut))
+      cat("Censored obs predicted above LOD_Y: ", above_LOD / n_cens *100)
+      # correlation with original values (i.e. before censoring)
+      cat("cor with original Y: ", cor(data[ind, "log10_Offspring"], data[ind, "Yobs_median"]))
+    }else if(censoring_dir == "X"){
+      # nr. > LOD
+      above_LOD <- length(which(data[ind, "Xobs_median"] >= cut))
+      cat("Predicted above LOD_X: ", above_LOD / n_cens *100)
+      # correlation with original values (i.e. before censoring)
+      cat("cor with original X: ", cor(data[ind, "log10_mother"], data[ind, "Xobs_median"]))
+    }else if(censoring_dir == "XY"){
+      # nr. > LOD
+      above_LOD <- length(which(data[ind, "Yobs_median"] >= cut))
+      cat("Censored obs predicted above LOD_Y: ", above_LOD / n_cens *100)
+      # correlation with original values (i.e. before censoring)
+      cat("cor with original Y: ", cor(data[ind, "log10_Offspring"], data[ind, "Yobs_median"]))
+    }
+  }
+  return(GOF)
+}
+
+# Y censored  
+get_GOF(data = df_complete_Y,
+         censoring_dir = "Y",
+        type = "uncens")
+
+get_GOF(data = df_complete_Y,
+         censoring_dir = "Y",
+        type = "cens")
+
+# X censored
+get_GOF(data = df_complete_X,
+         censoring_dir = "X",
+        type = "uncens")
+
+# get_GOF(data = df_complete_X,
+#          censoring_dir = "X",
+#         type = "cens")
+
+# XY censored
+get_GOF(data = df_complete_XY,
+         censoring_dir = "XY",
+        type = "uncens")
+get_GOF(data = df_complete_XY,
+         censoring_dir = "XY",
+        type = "cens")
+
+
+# kick out a group of outliers
+df_no_outliers <- df_complete %>% filter(log10_Mother <1 )
+
+
+
+```
+

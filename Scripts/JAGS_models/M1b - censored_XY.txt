@@ -1,0 +1,49 @@
+# model 1b: 5 parameters, equal variance on observed variables
+model{
+
+    # Likelihood model - uncensored
+    for(i in 1:n){
+	yobs[i] ~ dnorm(y[i], tau)
+    	y[i] <- a + b*x[i]
+    	x[i] ~ dnorm(mu_x, tau_x)
+	xobs[i] ~ dnorm(x[i], tau)
+    }
+
+    # Likelihood model - censored in Yobs
+    for(j in 1:c1){
+	z1[j] ~ dbern(p1[j])
+	p1[j] <- pnorm(cut1[j], y[n+j], tau)
+	y[n+j] <- a + b*x[n+j]
+	x[n+j] ~ dnorm(mu_x, tau_x)
+	xobs[n+j] ~ dnorm(x[n+j], tau)    	
+    }
+
+   # Likelihood model - censored in Xobs
+    for(k in 1:c2){
+        yobs[n+c1+k] ~ dnorm(y[n+c1+k], tau)
+	y[n+c1+k] <- a + b*x[n+c1+k]
+        x[n+c1+k] ~ dnorm(mu_x, tau_x)
+        z2[k] ~ dbern(p2[k])
+	p2[k] <- pnorm(cut2[k], x[n+c1+k], tau)  	
+    }
+
+    # Likelihood model - censored in Yobs and Xobs
+    for(l in 1:c3){
+	z3[l] ~ dbern(p3[l])
+	p3[l] <- pnorm(cut3[l], y[n+c1+c2+l], tau)
+	y[n+c1+c2+l] <- a + b*x[n+c1+c2+l]
+	x[n+c1+c2+l] ~ dnorm(mu_x, tau_x)
+	z4[l] ~ dbern(p4[l])
+	p4[l] <- pnorm(cut4[l], x[n+c1+c2+l], tau)     	
+    }
+
+    # Priors
+    tau_x ~ dgamma(1, 0.001)
+    tau ~ dgamma(1, 0.001)
+         
+    a ~ dnorm(0, 1/pow(sd, 2))
+    b ~ dnorm(1, 1/pow(10, 2))
+    mu_x ~ dnorm(mean, 1/pow(sd, 2))
+    mean <- max / 6
+    sd  <- max / 3
+}

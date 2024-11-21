@@ -1,0 +1,753 @@
+---
+title: "Postprocessing JAGS model runs"
+output: html_document
+---
+
+Here we post process the model runs regarding analysis 1, which aimed at developing 
+a Bayesian EIV model, a select among models M6, M5, and M4
+
+
+Note: In the 2nd chunk of the code, you can choose which one of the models (M6, 
+M5, or M4) you want to analyse. The last few chunks of code deal with the PPC plot
+which is adapted to model M5 (because at that stage that is the model that is 
+selected).
+
+
+```{r Setup, include=FALSE}
+
+## script setup
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# note: r version  4.3.2
+
+# clear work environment
+rm(list=ls())
+
+# directories  ---> do not forget to set your working directory
+dir.data <- "../Data/"
+dir.modelruns <- "../Model runs/"
+dir.output <- "../Output/"
+
+# packages
+library(dplyr)     # version 1.1.4
+library(ggplot2)   # version 3.5.1
+library(GGally)    # version 2.2.1
+library(coda)      # version 0.19-4
+library(rjags)     # version 4-15
+library(R2jags)    # version 0.7-1
+library(gridExtra) # version 2.3
+library(ggmcmc)    # version 1.5.1.1
+
+source("helper_functions/Get_samplesize.R")
+source("helper_functions/Get_posteriordf.R")
+source("helper_functions/Plot_trace.R")
+
+# for reproducibility
+set.seed(418)
+
+# plotting preferences
+My_Theme  <- theme(
+  title = element_text(size = 16),
+  axis.title.x = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.title.y = element_text(size = 16),
+  axis.text.y = element_text(size = 14),
+  legend.title = element_text(size = 12),
+  legend.text = element_text(size = 10),
+  strip.text = element_text(size = 16))
+
+nine_col <- c("#6FBFCF", "#9BBADD", "#3B74B3",
+              "#E69F00", "#D55E00", "#E69F80", 
+              "#009E73", "#009E90", "#009E60")
+dens_col <- c("#6FBFCF", "#E69F00","#009E73",
+              "#9BBADD", "#D55E00","#009E90",
+              "#3B74B3", "#E69F80","#009E60") 
+                
+                
+```
+
+
+
+```{r LoadRuns, include=FALSE}
+
+## load Jags model runs + identify model
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# choose one, the script analyses them one by one
+
+# load(paste0(dir.modelruns, "runs_M1a_2024-11-21.RData"))
+# Jagsout <- JagsM1a
+# modelname <- "M1a"
+
+# load(paste0(dir.modelruns, "runs_M1b_2024-11-21.RData"))
+# Jagsout <- JagsM1b
+# modelname <- "M1b"
+
+load(paste0(dir.modelruns, "runs_M1c_2024-11-21.RData"))
+Jagsout <- JagsM1c
+modelname <- "M1c"
+
+```
+
+
+```{r GetPost, include=FALSE}
+
+# get posterior samples
+post_df <- Get_posteriordf(jags_outputs = Jagsout,
+                                modelname = modelname)
+
+```
+
+```{r Chaindiagnostics, echo = FALSE}
+
+# convergence checks
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Get effective sample size
+SSz_dt <- Get_samplesize(jags_outputs = Jagsout)
+round(apply(SSz_dt, 2, mean),2)
+round(apply(SSz_dt, 2, sd), 2)
+
+```
+
+
+```{r CollectMCMC, echo = FALSE}
+# Note: might take some time for M6
+
+## Collect MCMC + traceplots for the model
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# apply function
+Plot_trace(samples = post_df,
+           file = paste0(dir.output, "traceplots_", modelname, "_", Sys.Date(),".png"))
+
+
+```
+
+```{r CreatePriors, echo = FALSE, fig.height = 7, fig.width = 7, fig.align = "center"}
+
+## create priors 
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+prior_max <- Jagsout[[1]]$model$data()[["max"]] 
+# this max is the same for all CV and models (because set before splitting the data in training and test sub-datasets)
+
+# a ~ dnorm(0, 1/pow(max/3, 2))
+a <- rnorm(n = 500000, mean = 0, sd = prior_max/3)
+a <- as.data.frame(a)
+# hist(a$a)
+
+# b ~ dnorm(1, 1/pow(0.1, 2))
+b <- rnorm(n = 500000, mean = 1, sd = 10)
+b <- as.data.frame(b)
+# hist(b$b)
+
+# mu_x ~ dnorm( max / 6 , 1 / (max / 3) ^2)
+mu_x <- rnorm(n = 500000, mean = prior_max/6, sd = prior_max/3 )
+mu_x <- as.data.frame(mu_x)
+# hist(mu_x$mu_x)
+
+# tau ~ dgamma(1, 0.001) - idem for tau_u, tau_x and tau_y
+tau <- rgamma(n = 500000, shape = 1, rate = 0.001)
+tau <- as.data.frame(tau)
+tau_u <- tau
+tau_x <- tau
+tau_y <- tau
+# hist(tau$tau)
+
+# collect all
+prior <- list(a, b, mu_x, tau_u, tau_x, tau_y, tau)
+names(prior) <- c("a", "b", "mu_x", "tau_u", "tau_x", "tau_y", "tau")
+
+
+# put in dataframe
+prior_df <- data.frame(a = prior$a,
+                       b = prior$b, 
+                       mu_x = prior$mu_x,
+                       tauu = prior$tau_u,
+                       tauy = prior$tau_y, 
+                       taux = prior$tau_x, 
+                       tau = prior$tau)
+colnames(prior_df) <- c("a", "b", "mu_x", "tau_u", "tau_x", "tau_y", "tau")
+```
+
+
+
+```{r PriorPosteriorPlot, echo = FALSE, fig.height = 7, fig.width = 7, fig.align = "center"}
+
+## Prior - Posterior distribution plots
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Posterior distribution (colored histograms)
+# Prior distribution (red line).
+
+plots <- list()
+
+# get parameters 
+params <- Jagsout[[1]]$parameters.to.save
+if(any(params %in% "deviance")){params <- params[-which(params=="deviance")]}
+  
+# plot each parameter
+for( i in 1:length(params) ){
+  
+  # get data
+  plotdata <- post_df[,c(params[i], "CV", "chain")]
+  colnames(plotdata)[1] <- c("parameter")
+  priordata <- prior[[params[i]]]
+  colnames(priordata)[1] <-  c("parameter")
+  
+  # plot data
+  p <- ggplot(data = plotdata, aes(x = parameter)) +
+    geom_histogram(aes(fill = as.factor(CV)), position = "identity", alpha = 0.5, bins = 500) +
+    # facet_wrap(~CV) +
+    scale_fill_manual(values = dens_col) +
+    geom_density(data = priordata, aes(parameter), color = "tomato", linewidth = 1.2) +
+    labs(x = params[i],  y="Density",
+         fill = "CV", colour = "Prior") +
+    theme_classic()
+  
+    p <- p + xlim(min(plotdata$parameter), max(plotdata$parameter))
+    plots[[i]] <- p
+
+}
+
+
+file <- paste0(dir.output, "PriPostPlot_", modelname, "_", Sys.Date(),".png")
+png(file = file, 
+      res = 300, units = "cm", width = 20,height = 25)
+if(modelname == "M1a"){
+  grid.arrange(plots[[1]], plots[[2]],
+               plots[[3]],  plots[[4]],
+               plots[[5]], plots[[6]],
+               ncol=2, nrow = 3)
+}
+if(modelname == "M1b"){
+  grid.arrange(plots[[1]], plots[[2]],
+               plots[[3]],  plots[[4]],
+               plots[[5]],
+               ncol=2, nrow = 3)
+}
+if(modelname == "M1b_cens"){
+  grid.arrange(plots[[1]], plots[[2]],
+               plots[[3]],  plots[[4]],
+               plots[[5]],
+               ncol=2, nrow = 3)
+}
+if(modelname == "M1c"){
+  grid.arrange(plots[[1]], plots[[2]],
+               plots[[3]],  plots[[4]],
+               ncol=2, nrow = 3)
+}
+dev.off()
+
+```
+
+
+
+```{r PosteriorCorrelationPlot, echo = FALSE, fig.height = 7, fig.width = 7, fig.align = "center"}
+
+# Note: might take some time for M6
+
+## Posterior correlation plot
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# get parameters
+params <- Jagsout[[1]]$parameters.to.save
+params <- params[-which(params == "deviance")]
+
+# prepare plot
+png(filename = paste0(dir.output, "/ParamCor-", modelname, "-", Sys.Date(),".png"),
+    res = 300, units = "cm",width = 25, height = 25)
+
+if(length(Jagsout) == 3){ ## if we are doing 3 fold cross validation
+  print("posterior correlation plot for 3-fold CV model runs")
+  
+  ggpairs(post_df[ , c(params, "CV")],
+          # upper = list(continuous = "density"),
+          mapping=ggplot2::aes(colour = post_df$CV),
+          upper = list(continuous = wrap("cor", method = "spearman")),
+          lower = list(continuous = wrap("points", alpha = 0.3))) +
+    theme_classic()
+  
+}else if(length(Jagsout) == 1){ # if it if just a single output (no 3 fold CV)
+  print("posterior correlation plot for single model run")
+  
+  ggpairs(post_df[ , params],
+          # upper = list(continuous = "density"),
+          mapping=ggplot2::aes(),
+          upper = list(continuous = wrap("cor", method = "spearman")),
+          lower = list(continuous = wrap("points", alpha = 0.3))) +
+    theme_classic()
+  
+}
+
+dev.off()
+
+```
+
+
+```{r Param_summary, include=FALSE}
+
+## parameter summary data
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# # mean
+# apply(post_df[, params], 2, mean)
+
+# median and 95% CI
+round(apply(post_df[, params], 2, quantile, probs = c(0.025, 0.5, 0.975)), 2)
+
+# 95% CI range
+CIrange <- apply(post_df[, params], 2, quantile, probs = 0.975) - 
+  apply(post_df[, params], 2, quantile, probs = 0.025)
+# Coef Var (alternative with median and 95CI)
+median <- apply(post_df[, params], 2, quantile, probs = 0.5)
+CValt <- abs(median)/CIrange
+round(CValt, 2)
+
+
+# for prior
+round(apply(prior_df[, params], 2, quantile, probs = c(0.025, 0.5, 0.975)), 2)
+
+```
+
+
+
+
+
+The code below, only makes sense to apply to model M5, as we already selected 
+this M5 as the best model
+
+
+```{r ReadData, include=FALSE}
+
+## read & prepare observed data
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# read data
+df <- read.csv(file = paste0(dir.data, "dataset_1a.csv"))
+dim(df)
+
+# prepare
+df_noncens <- df %>%  
+  mutate(log10_Mother = log10(Mother_concentration)) %>%          
+  mutate(log10_Offspring = log10(Offspring_concentration))
+dim(df_noncens)
+
+# compound classes
+df_noncens$compound_class_broad <- as.factor(df_noncens$compound_class_broad)
+cbp1 <- c("#E69F00", "#009E73", "#CC79A7","#56B4E9", "#000000",
+           "#D55E00","#CC79A7", "#F0E442", "#0072B2",  "#009E73")
+
+
+```
+
+
+
+```{r PredicionsTestSet}
+
+## make predictions for test dataset with the 3CV trained models
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# load training and test datasets
+load(paste0(dir.modelruns, "datasets_2024-11-21.RData"))
+
+
+# overall strategy: Xi (latent) = Xobs fixed as "known" mother values => predict Yi, and draw obs for Yobs
+for (CVi in 1:length(unique(post_df$CV))){ # for each crossvalidation
+  
+  # get posterior for this CV
+  post_select <- post_df %>%
+    filter(CV == CVi)
+  
+  # get test set
+  test_df <- datasets[["test"]][[paste0("CV", CVi)]]
+   # test_df <- df_noncens # just for C. serpentina
+  
+  
+  # add columns for results
+  test_df$Yobs_median <- NA
+  test_df$Yobs_lower <- NA
+  test_df$Yobs_upper <- NA
+
+  # # some message for testing and tracking
+  # cat("selected CV:", CVi, " CV in dataset:", unique(test_df$CV), "dim:", dim(test_df), "\n")  
+  
+  # for each X in test set
+  for(i in 1:nrow(test_df)){
+    
+    # we use mother as x values ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    xi <- test_df[i, "log10_Mother"]  
+    
+    # predict Yi from Xi ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    # M1a, b: y[i] <- a + b*x[i] or M1c: y[i] <- a + x[i]
+    if(modelname == "M1c"){
+      yi  <- post_select[ , "a"] + xi # yi = a predicted y for 1 posterior param set
+    } else{
+      yi  <- post_select[ , "a"] + post_select[ , "b"] * xi
+    } 
+    
+    # derive Yobs ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    # M1a: yobs[i] ~ dnorm(y[i], tau_y) or M1b, c: yobs[i] ~ dnorm(y[i], tau)
+    Yobs <- NULL
+    for(j in 1:nrow(post_select)){ # for each posterior draw
+      if(modelname == "M1a"){
+        Yobs[j] <- rnorm(n = 1, 
+                          mean = yi[j], 
+                          sd = sqrt(1/post_select[j , "tau_y"]))
+      }else{
+        Yobs[j] <- rnorm(n = 1, 
+                          mean = yi[j], 
+                          sd = sqrt(1/post_select[j , "tau"]))
+      }
+    }
+    
+    # derive Xobs ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    # M1a: xobs[i] ~ dnorm(x[i], tau_y) or M1b, c: xobs[i] ~ dnorm(x[i], tau)
+    Xobs <- NULL
+    for(j in 1:nrow(post_select)){ # for each posterior draw
+      if(modelname == "M1a"){
+        Xobs[j] <- rnorm(n = 1, 
+                          mean = xi, 
+                          sd = sqrt(1/post_select[j , "tau_y"]))
+      }else{
+        Xobs[j] <- rnorm(n = 1, 
+                          mean = xi, 
+                          sd = sqrt(1/post_select[j , "tau"]))
+      }
+    }
+  
+    # save results
+    test_df[i, "Yobs_median"] <- quantile(Yobs, probs = c(0.5))
+    test_df[i, "Yobs_lower"] <- quantile(Yobs, probs = c(0.025))
+    test_df[i, "Yobs_upper"] <- quantile(Yobs, probs = c(0.925))  
+    test_df[i, "Xobs_median"] <- quantile(Xobs, probs = c(0.5))
+    test_df[i, "Xobs_lower"] <- quantile(Xobs, probs = c(0.025))
+    test_df[i, "Xobs_upper"] <- quantile(Xobs, probs = c(0.925))  
+    
+  }
+  # save extended test dataset over the old one
+  test_df$CV <- paste0("CV", CVi)
+  datasets[["test"]][[paste0("CV", CVi)]] <- test_df
+  head(test_df)
+}
+
+# combine test datasets
+df_complete <- rbind(datasets[["test"]][["CV1"]],
+      datasets[["test"]][["CV2"]],
+      datasets[["test"]][["CV3"]])
+
+# df_complete <- test_df # just for C. serpentina
+
+```
+
+
+
+```{r PPC}
+
+# Posterior predictive check (PPC)
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# percentage of predictions falling within the uncertainty band
+# (EFSA PPR, 2018a)
+
+
+# Posterior predictive check if log10_offspring is within lower-upper bound
+df_complete <- df_complete %>%
+  mutate(PPC_color = ifelse(log10_Offspring >= Yobs_lower & log10_Offspring <= Yobs_upper, TRUE, FALSE)) 
+
+# sort the data, so that a line can be drawn
+df_complete <- df_complete[order(df_complete$log10_Mother, decreasing = TRUE),]
+
+# plot PPC
+p <- df_complete %>% 
+ ggplot() +
+  # x direction errors - XObs
+  geom_segment(aes(y = Yobs_median, yend = Yobs_median,
+                   x = Xobs_lower, xend = Xobs_upper), 
+                   color = "grey70") +
+  # prediction segments model - Yobs
+  geom_segment(aes(x = log10_Mother, xend = log10_Mother,
+                   y = Yobs_lower, yend = Yobs_upper, 
+                   color = PPC_color), lwd =.8) +
+  scale_color_manual(values = c("orange","darkgreen", "steelblue")) +
+  # data
+  geom_point(aes(x = log10_Mother,
+                 y = log10_Offspring)) +
+  # facetting
+  facet_wrap(~CV) +
+  # cosmetics
+  labs(x = "Log10 Mother",
+       y = "Log10 Offspring") +
+  # prediction median model
+  geom_abline(intercept = -0.33, slope = 1.14, 
+              linewidth = 1.2, color = "black") +
+  # cosmetics
+  theme_bw() +
+  theme(legend.position = "below")  +
+  My_Theme
+p
+
+
+
+png(filename = paste0(dir.output, modelname, "PPC-3CV",  "-", Sys.Date(), ".png"),
+    res = 300,units = "cm",width = 25, height = 15)
+p
+dev.off()
+
+
+# PPC in table output
+PPC_table <- df_complete %>%
+  group_by(CV) %>%
+  group_by(CV) %>%
+  count(PPC_color) %>%
+  group_by(CV) %>%
+  mutate(percent = n/sum(n)*100)
+PPC_table
+
+write.table(PPC_table, 
+            file = paste0(dir.output, modelname, "-", "PPC-table",  "-", Sys.Date(), ".txt"))
+
+
+```
+
+```{r GOFmeasures}
+
+# Goodness of Fit measures
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+GOF <- list(Rsquared = c(),
+            NSE = c(),
+            nRMSE = c())
+
+for(i in 1:length(unique(df_complete$CV))){
+  
+  # CV index
+  ind <- which(df_complete$CV == unique(df_complete$CV)[i])
+  
+  # get observed and predicted offspring concentrations
+  obs <- df_complete[ind, "log10_Offspring"]
+  pred <- df_complete[ind, "Yobs_median"]
+  
+  # residual plot ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # to look for residual patterns
+  res <- obs - pred
+  plot(res)
+  abline(h=0)
+
+  
+  # predictive Pearson R2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  #   It has also to be noted that Pearson r2 only
+  # evaluates linear relationships between observed and predicted data, not
+  # how well the observations are matched (cf. Legates and McCabe
+  # (1999)): One can have r2 = 1 and be way off the 1:1 line
+  GOF$Rsquared[i] <- cor(obs, pred, method = "pearson")
+  
+  # Nash-Sutcliffe coefficient of Efficiency (NSE) (Nash and Sutcliffe, 1970) ~~~~~~~~~~~~~~
+  # actually just a Coefficient of Determination R2, but called NSE for  comparison of observed and  predicted values (Reichenberger et al., 2019)
+  GOF$NSE[i] <- 1 - ( sum( (obs-pred)^2 ) / sum( (obs-mean(obs))^2 ) )
+  
+  #  Root Mean Squared Error of prediction
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # (Reichenberger et al., 2019) for GOF and predictive accuracy
+  GOF$nRMSE[i] <- (sqrt( sum( (obs - pred)^2 ) / length(obs))) * 1 / mean(obs)
+  
+
+}
+  
+GOF
+lapply(GOF, mean)
+lapply(GOF, sd)
+
+
+
+```
+
+
+## External validation
+
+```{r Predictions_external}
+
+## make external predictions with the trained model
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# get posterior
+post_select <- post_df
+
+# get test set
+df <- read.csv(file = paste0(dir.data, "dataset_2b.csv"))
+# prepare
+test_df <- df %>%  
+  mutate(log10_Mother = log10(Mother_concentration)) %>%          
+  mutate(log10_Offspring = log10(Offspring_concentration))
+
+
+# add columns for results
+test_df$Yobs_median <- NA
+test_df$Yobs_lower <- NA
+test_df$Yobs_upper <- NA
+
+# for each X in test set
+for(i in 1:nrow(test_df)){
+  
+  # we use mother as x values ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  xi <- test_df[i, "log10_Mother"]  
+  
+  # predict Yi from Xi ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # M1a, b: y[i] <- a + b*x[i] or M1c: y[i] <- a + x[i]
+  if(modelname == "M1c"){
+    yi  <- post_select[ , "a"] + xi # yi = a predicted y for 1 posterior param set
+  } else{
+    yi  <- post_select[ , "a"] + post_select[ , "b"] * xi
+  } 
+  
+  # derive Yobs ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # M1a: yobs[i] ~ dnorm(y[i], tau_y) or M1b, c: yobs[i] ~ dnorm(y[i], tau)
+  Yobs <- NULL
+  for(j in 1:nrow(post_select)){ # for each posterior draw
+    if(modelname == "M1a"){
+      Yobs[j] <- rnorm(n = 1, 
+                       mean = yi[j], 
+                       sd = sqrt(1/post_select[j , "tau_y"]))
+    }else{
+      Yobs[j] <- rnorm(n = 1, 
+                       mean = yi[j], 
+                       sd = sqrt(1/post_select[j , "tau"]))
+    }
+  }
+  
+  # derive Xobs ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # M1a: xobs[i] ~ dnorm(x[i], tau_y) or M1b, c: xobs[i] ~ dnorm(x[i], tau)
+  Xobs <- NULL
+  for(j in 1:nrow(post_select)){ # for each posterior draw
+    if(modelname == "M1a"){
+      Xobs[j] <- rnorm(n = 1, 
+                       mean = xi, 
+                       sd = sqrt(1/post_select[j , "tau_y"]))
+    }else{
+      Xobs[j] <- rnorm(n = 1, 
+                       mean = xi, 
+                       sd = sqrt(1/post_select[j , "tau"]))
+    }
+  }
+  
+  # save results
+  test_df[i, "Yobs_median"] <- quantile(Yobs, probs = c(0.5))
+  test_df[i, "Yobs_lower"] <- quantile(Yobs, probs = c(0.025))
+  test_df[i, "Yobs_upper"] <- quantile(Yobs, probs = c(0.925))  
+  test_df[i, "Xobs_median"] <- quantile(Xobs, probs = c(0.5))
+  test_df[i, "Xobs_lower"] <- quantile(Xobs, probs = c(0.025))
+  test_df[i, "Xobs_upper"] <- quantile(Xobs, probs = c(0.925))  
+  
+}
+# # save extended test dataset over the old one
+# test_df$CV <- paste0("CV", CVi)
+# datasets[["test"]][[paste0("CV", CVi)]] <- test_df
+head(test_df)
+
+
+df_complete <- test_df
+
+```
+
+```{r PPC_external}
+
+# Posterior predictive check (PPC)
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Posterior predictive check if log10_offspring is within lower-upper bound
+df_complete <- df_complete %>%
+  mutate(PPC_color = ifelse(log10_Offspring >= Yobs_lower & log10_Offspring <= Yobs_upper, TRUE, FALSE)) 
+
+# sort the data, so that a line can be drawn
+df_complete <- df_complete[order(df_complete$log10_Mother, decreasing = TRUE),]
+
+# plot PPC
+p <- df_complete %>% 
+ ggplot() +
+  # x direction errors - XObs
+  geom_segment(aes(y = Yobs_median, yend = Yobs_median,
+                   x = Xobs_lower, xend = Xobs_upper), 
+                   color = "grey70") +
+  # prediction segments model - Yobs
+  geom_segment(aes(x = log10_Mother, xend = log10_Mother,
+                   y = Yobs_lower, yend = Yobs_upper, 
+                   color = PPC_color), lwd =.8) +
+  scale_color_manual(values = c("orange","darkgreen", "steelblue")) +
+
+  # data
+  geom_point(aes(x = log10_Mother,
+                 y = log10_Offspring)) +
+  # cosmetics
+  labs(x = "log10 Mother",
+       y = "Log10 Offspring") +
+  # prediction median model
+  geom_abline(intercept = -0.33, slope = 1.14, 
+              linewidth = 1.2, color = "black") +
+    # cosmetics
+  theme_bw() +
+  theme(legend.position = "below")  +
+  My_Theme
+
+
+png(filename = paste0(dir.output, modelname, "-Cserpentina-", "PPC-3CV",  "-", Sys.Date(), ".png"),
+    res = 300,units = "cm",width = 15, height = 15)
+p
+dev.off()
+
+
+# PPC in table output
+PPC_table <- df_complete %>%
+  count(PPC_color) %>%
+  mutate(percent = n/sum(n)*100)
+PPC_table
+
+write.table(PPC_table, 
+            file = paste0(dir.output, modelname, "-", "PPC-table-Cserpentina",  "-", Sys.Date(), ".txt"))
+
+
+```
+
+
+```{r GOFmeasures_external}
+
+# Goodness of Fit measures
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+GOF <- list(Rsquared = c(),
+            NSE = c(),
+            nRMSE = c())
+
+
+# get observed and predicted offspring concentrations
+obs <- df_complete[, "log10_Offspring"]
+pred <- df_complete[, "Yobs_median"]
+
+# residual plot ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# to look for residual patterns
+res <- obs - pred
+plot(res)
+abline(h=0)
+
+
+# predictive Pearson R2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   It has also to be noted that Pearson r2 only
+# evaluates linear relationships between observed and predicted data, not
+# how well the observations are matched (cf. Legates and McCabe
+# (1999)): One can have r2 = 1 and be way off the 1:1 line
+GOF$Rsquared <- cor(obs, pred, method = "pearson")
+
+# Nash-Sutcliffe coefficient of Efficiency (NSE) (Nash and Sutcliffe, 1970) ~~~~~~~~~~~~~~
+# actually just a Coefficient of Determination R2, but called NSE for  comparison of observed and  predicted values (Reichenberger et al., 2019)
+GOF$NSE <- 1 - ( sum( (obs-pred)^2 ) / sum( (obs-mean(obs))^2 ) )
+
+#  Root Mean Squared Error of prediction
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# (Reichenberger et al., 2019) for GOF and predictive accuracy
+GOF$nRMSE <- (sqrt( sum( (obs - pred)^2 ) / length(obs))) * 1 / mean(obs)
+
+
+
+GOF
+
+
+```
+
