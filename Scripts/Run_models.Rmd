@@ -57,7 +57,7 @@ set.seed(124)
 ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 # read data
-df_noncens <- read.csv(file = paste0(dir.data, "dataset_1a.csv"))
+df_noncens <- read.csv(file = paste0(dir.data, "dataset_1.csv"))
 dim(df_noncens)
 
 # prepare data (i.e. log transform observations)

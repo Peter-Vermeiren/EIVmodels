@@ -324,7 +324,7 @@ this M5 as the best model
 ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 # read data
-df <- read.csv(file = paste0(dir.data, "dataset_1a.csv"))
+df <- read.csv(file = paste0(dir.data, "dataset_1.csv"))
 dim(df)
 
 # prepare
@@ -573,7 +573,7 @@ lapply(GOF, sd)
 post_select <- post_df
 
 # get test set
-df <- read.csv(file = paste0(dir.data, "dataset_2b.csv"))
+df <- read.csv(file = paste0(dir.data, "dataset_2.csv"))
 # prepare
 test_df <- df %>%  
   mutate(log10_Mother = log10(Mother_concentration)) %>%          
