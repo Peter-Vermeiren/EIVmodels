@@ -1,0 +1,30 @@
+# model 1b: 5 parameters, equal variance on observed variables
+# implementation with dinterval() function
+
+model{
+
+    # Likelihood model
+    for(i in 1:n){ # n is nr. of fully observed cases
+	yobs[i] ~ dnorm(y[i], tau)
+    	y[i] <- a + b*x[i]
+    	x[i] ~ dnorm(mu_x, tau_x)
+	xobs[i] ~ dnorm(x[i], tau)
+    }
+    for(j in i:J){ # J is nr. of censored cases
+	R[J] ~ dinterval(yobs[n+j], lod[j,])  # dinterval function to separate censored and uncensored observations
+	yobs[n+j] ~ dnorm(y[n+j], tau)
+    	y[n+j] <- a + b*x[n+j]
+    	x[n+j] ~ dnorm(mu_x, tau_x)
+	xobs[n+j] ~ dnorm(x[n+j], tau)
+    }
+
+    # Priors
+    tau_x ~ dgamma(1, 0.001)
+    tau ~ dgamma(1, 0.001)
+         
+    a ~ dnorm(0, 1/pow(sd, 2))
+    b ~ dnorm(1, 1/pow(10, 2))
+    mu_x ~ dnorm(mean, 1/pow(sd, 2))
+    mean <- max / 6
+    sd  <- max / 3
+}

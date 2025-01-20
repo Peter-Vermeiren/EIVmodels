@@ -3,10 +3,10 @@ model{
 
     # Likelihood model
     for(i in 1:n){
-    	xobs[i] ~ dnorm(x[i], tau)
-	yobs[i] ~ dnorm(y[i], tau)
-    	y[i] <- a + b*x[i]
-    	x[i] ~ dnorm(mu_x, tau_x)
+    	xobs[i] ~ dnorm(x[i], tau) # measurement uncertainty in observed X values
+	yobs[i] ~ dnorm(y[i], tau) # measurement uncertainty in observed Y values
+    	y[i] <- a + b*x[i]  # deterministic relationship between X and Y
+    	x[i] ~ dnorm(mu_x, tau_x) # population level uncertainty on X
     }
 
     # Priors

@@ -1,0 +1,931 @@
+---
+title: "Error-in-variables regression for mother-egg concentrations"
+output: html_document
+---
+
+In this script we will model the relationship between concentrations of organic
+pollutants in paired samples of female (x-axis) and offspring (y-axis) tissues.
+Since both female and egg tissues are dependent variables, we will consider an
+error term on both these variables (following the idea of orthogonal
+regression / error-in variables regression). 
+
+Several models are developed and compared using wAIC. Model runs
+are saved for post processing in a separate script.
+
+Note: some of the code might take a while to execute, it might be better to run
+the code chunk by chunk rather than knitting the whole document in one go.
+
+
+```{r Setup, include=FALSE}
+
+## script setup
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# note: r version  4.3.2
+
+# clear r environment
+rm(list = ls())
+
+# directories  ---> do not forget to set your working directory
+dir.data <- "../Data/"
+dir.modelruns <- "../Model runs/"
+dir.jagsmodels <- "JAGS_models/"
+
+# packages
+library(dplyr)       # version 1.1.4
+library(ggplot2)     # version 3.5.1
+library(gridExtra)   # version 2.3
+library(GGally)      # version 2.2.1
+library(coda)        # version 0.19-4
+library(rjags)       # version 4-15
+library(R2jags)      # version 0.7-1
+library(lattice)     # version 0.21-9
+library(pracma)      # version 2.4.4 - for orthogonal regression using frequentist inference
+library(loo)         # version 2.6.0
+
+# for reproducibility
+set.seed(124)
+
+
+```
+
+
+
+```{r ReadData, include=FALSE}
+
+## read & prepare data
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# read data
+df_noncens <- read.csv(file = paste0(dir.data, "dataset_1.csv"))
+dim(df_noncens)
+
+# prepare data (i.e. log transform observations)
+df_noncens <- df_noncens %>%  
+  mutate(log10_Mother = log10(Mother_concentration)) %>%          
+  mutate(log10_Offspring = log10(Offspring_concentration))
+dim(df_noncens)  
+
+# check for NA values
+any(is.na(df_noncens$log10_Mother))
+any(is.na(df_noncens$log10_Offspring))
+
+```
+
+
+```{r FreqModel, include=TRUE}
+
+## frequentist orthogonal regression (on whole dataset)
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+x_obs <- df_noncens$log10_Mother
+y_obs <- df_noncens$log10_Offspring
+odr <- odregress(x_obs, y_obs)    # Note: cannot have NA values in x or y, make sure to remove them
+FreqCoeff <- odr$coeff
+FreqCoeff
+
+# Prediction
+xnew <- seq(-2, 8, by = 0.5)
+ynew <- cbind(xnew, 1) %*% odr$coeff
+
+plot(x_obs, y_obs, xlim = c(-2, 8), ylim = c(-2, 8), las = 1)
+abline(a = 0, b = 1)
+abline(lm(y_obs ~ x_obs), col="blue")                               # normal linear regression line in blue
+points(xnew, ynew, col = "red", pch = 17)
+lines(c(-2, 8), FreqCoeff[1]*c(-2, 8) +  FreqCoeff[2], col="red")   # orthogonal regression in red
+
+```
+
+```{r Priors, include=FALSE}
+
+## Priors
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# take the largest concentration in either offspring or mother to inform on our
+# prior distributions, then remove this largest point from the dataset (i.e. do
+# not use the same data point twice)
+# the max value is the multiplied by 3
+
+max_xObs <- max(df_noncens$log10_Mother, na.rm=T)
+max_yObs <- max(df_noncens$log10_Offspring, na.rm=T)
+
+if(max_xObs > max_yObs){
+  max <- max_xObs * 3
+  df_noncens <- df_noncens[-which(df_noncens$log10_Mother == max_xObs), ]
+}else{
+  max <- max_yObs * 3
+  df_noncens <- df_noncens[-which(df_noncens$log10_Offspring == max_yObs),]
+}
+
+```
+
+
+```{r Cross-validation, include=TRUE}
+
+## Cross-validation
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Define sample size for k-folds over whole dataset (in our case 3 fold)
+k <- 3
+i <- nrow(df_noncens)
+f <- as.integer(i/k) # size of a fraction
+
+# Check if there are any data which could not be added to a fraction (i.e. the
+# dataset size is not dividable by k) then, randomly select the k folds to add
+# the remaining randomly selected sites
+r <- i-(f*k)
+i.fold <- rep(f, k)
+if (r > 1){
+  x <- sample(1:k, r)
+  i.fold[x] <- i.fold[x] + 1
+} else {
+  x <- sample(1:k, 1)
+  i.fold[x] <- i.fold[x] + r
+}
+
+# create vector where each fold integer is repeated i.fold times
+# then, randomly sample without replacement
+repeated_vector <- rep(1:k, times = i.fold)
+fold.ind <- sample(repeated_vector, replace = F)
+# hist(fold.ind)
+
+# divide the data according to the random samples
+fold1.df <- df_noncens[which(fold.ind==1),]
+fold2.df <- df_noncens[which(fold.ind==2),]
+fold3.df <- df_noncens[which(fold.ind==3),]
+
+# Combine the folds into training and testing datasets
+train1 <- rbind(fold1.df, fold2.df)
+test1  <- fold3.df
+train2 <- rbind(fold2.df, fold3.df)
+test2  <- fold1.df
+train3 <- rbind(fold1.df, fold3.df)
+test3  <- fold2.df
+
+# quick check
+p1 <- ggplot(data = train1,
+       aes(x = log10_Mother, y = log10_Offspring)) + geom_point()
+p2 <- ggplot(data = train2,
+       aes(x = log10_Mother, y = log10_Offspring)) + geom_point()
+p3 <- ggplot(data = train3,
+       aes(x = log10_Mother, y = log10_Offspring)) + geom_point()
+grid.arrange(p1,p2,p3)
+
+# need to save the datasets
+datasets = list(training = list(CV1= train1,
+                                CV2 = train2,
+                                CV3 = train3),
+                test = list(CV1= test1,
+                            CV2 = test2,
+                            CV3 = test3))
+save(datasets,
+     file = paste0(dir.modelruns, "datasets_", Sys.Date(),".RData"))
+
+
+```
+
+
+
+```{r CensoredData, include=FALSE}
+
+## create censored data (from whole dataset, no CV)
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# we will create datasets where 1 of the variables contains
+# censored values (the lowest 20% of the data)
+
+# calculate cut off
+cutoff_Y <- quantile(df_noncens$log10_Offspring, probs = 0.2)
+cutoff_X <- quantile(df_noncens$log10_Mother, probs = 0.2)
+
+# Option 0: no censoring 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# plot
+png(file = "../Output/Uncensored data.png",
+    res = 300, units = "cm", width = 12, height = 11)
+
+p0 <- df_noncens %>% 
+  ggplot() +
+  geom_point(aes(x = log10_Mother, 
+                 y = log10_Offspring)) + 
+  scale_shape_manual(values=c(19, 4)) +
+  labs(x = "Mother concentration",  
+         y = "Offspring concentration") +
+  theme_classic() + theme(legend.position = "none")
+p0
+dev.off()
+
+
+
+# Option 1: censoring in Y variable (egg concentrations)
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# prepare data
+df_cens1 <- df_noncens %>%  
+  mutate(censored_Y_YN = ifelse(log10_Offspring >= cutoff_Y, 0, 1)) %>% # R variable
+  mutate(LOD_Y = ifelse(log10_Offspring >= cutoff_Y, -10000, cutoff_Y)) %>% # cut off value, ridiculous number otherwise
+  mutate(Yobs = ifelse(log10_Offspring >= cutoff_Y, log10_Offspring, NA)) # available offspring observations (NA for censored values)
+# reorder the data with non censored followed by censored
+data.obs <- df_cens1[which(df_cens1$censored_Y_YN == 0), ]     # subset: 411 
+data.mis <- df_cens1[which(df_cens1$censored_Y_YN == 1), ]      # subset: 103
+df_cens1 <- rbind(data.obs, data.mis) # total: 514 
+
+# plot
+png(file = "../Output/Censored Y data.png",
+    res = 300, units = "cm", width = 12, height = 11)
+p1 <- df_cens1 %>% 
+  ggplot() +
+  geom_point(aes(x = log10_Mother, 
+                 y = log10_Offspring,
+                 shape = as.factor(censored_Y_YN))) + 
+  geom_hline(aes(yintercept = cutoff_Y),
+              col = "#F26722", lwd = 1.2, lty = "dashed") +
+  scale_shape_manual(values=c(19, 4)) +
+  labs(x = "Mother concentration",  
+       y = "Offspring concentration") +
+  theme_classic() + theme(legend.position = "none")
+p1
+dev.off()
+
+# Option 2: censoring in X variable (mother concentrations)
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# prepare data
+df_cens2 <- df_noncens %>%  
+  mutate(censored_X_YN = ifelse(log10_Mother >= cutoff_X, 0, 1)) %>% # R variable
+  mutate(LOD_X = ifelse(log10_Mother >= cutoff_X, -10000, cutoff_X)) %>% # cut off value, ridiculous number otherwise
+  mutate(Xobs = ifelse(log10_Mother >= cutoff_X, log10_Mother, NA)) # available offspring observations (NA for censored values)
+# reorder the data with non censored followed by censored
+data.obs <- df_cens2[which(df_cens2$censored_X_YN == 0), ]     # subset: 417 
+data.mis <- df_cens2[which(df_cens2$censored_X_YN == 1), ]      # subset: 97
+df_cens2 <- rbind(data.obs, data.mis) # total: 514 
+
+# plot
+png(file = "../Output/Censored X data.png",
+    res = 300, units = "cm", width = 12, height = 11)
+p2 <- df_cens2 %>% 
+  ggplot() +
+  geom_point(aes(x = log10_Mother, 
+                 y = log10_Offspring,
+                 shape = as.factor(censored_X_YN))) + 
+  geom_vline(aes(xintercept = cutoff_X),
+              col = "#F26722", lwd = 1.2, lty = "dashed") +
+  scale_shape_manual(values=c(19, 4)) +
+  labs(x = "Mother concentration",  
+       y = "Offspring concentration") +
+  theme_classic() + theme(legend.position = "none")
+p2
+dev.off()
+
+
+# Option 3: censoring in X and Y variables (mother and offspring concentrations)
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# prepare data
+df_cens3 <- df_noncens %>%  
+  # censoring in Y
+  mutate(censored_Y_YN = ifelse(log10_Offspring >= cutoff_Y, 0, 1)) %>% # 0 or 1 to indicate censoring
+  mutate(LOD_Y = ifelse(log10_Offspring >= cutoff_Y, -10000, cutoff_Y)) %>% # value of the LOD
+  mutate(Yobs = ifelse(log10_Offspring >= cutoff_Y, log10_Offspring, NA)) %>% # observed values
+  # censoring in X
+  mutate(censored_X_YN = ifelse(log10_Mother >= cutoff_X, 0, 1)) %>% # 0 or 1 to indicate censoring
+  mutate(LOD_X = ifelse(log10_Mother >= cutoff_X, -10000, cutoff_X)) %>% # value of the LOD
+  mutate(Xobs = ifelse(log10_Mother >= cutoff_X, log10_Mother, NA)) %>% # observed values
+  # identify if censoring in both directions
+  # mutate(censored_XandY = ifelse(censored_Y_YN + censored_X_YN == 2, 1, 0)) %>%
+  mutate(cens_type = case_when(log10_Mother < cutoff_X & log10_Offspring < cutoff_Y ~ "both",
+                            log10_Mother < cutoff_X & log10_Offspring >= cutoff_Y ~ "X only",
+                            log10_Mother >= cutoff_X & log10_Offspring < cutoff_Y ~ "Y only",
+                         log10_Mother >= cutoff_X & log10_Offspring >= cutoff_Y ~ "none"))
+  
+
+# reorder the data: (1) non censored followed by censored (2) in Y, (3) in X, and (4) in Y and X
+data.obs <- df_cens3[which(df_cens3$cens_type == "none"), ] 
+dim(data.obs)    # subset: 393
+data.cen_Y <-  df_cens3[which(df_cens3$cens_type == "Y only"), ] 
+dim(data.cen_Y) # subset: 24
+data.cen_X <-  df_cens3[which(df_cens3$cens_type == "X only"), ] 
+dim(data.cen_X) # subset: 18
+data.cen_XY <-  df_cens3[which(df_cens3$cens_type == "both"), ] 
+dim(data.cen_XY) # subset: 18
+df_cens3 <- rbind(data.obs, data.cen_Y, data.cen_X, data.cen_XY) # total: 514 
+dim(df_cens3) # total 514 rows
+
+# plot
+png(file = "../Output/Censored XY data.png",
+    res = 300, units = "cm", width = 12, height = 11)
+p3 <- df_cens3 %>% 
+  ggplot() +
+  geom_point(aes(x = log10_Mother, 
+                 y = log10_Offspring,
+                 shape = as.factor(cens_type))) + 
+  geom_hline(aes(yintercept = cutoff_Y),
+             col = "#F26722", lwd = 1.2, lty = "dashed") +
+  geom_vline(aes(xintercept = cutoff_X),
+             col = "#F26722", lwd = 1.2, lty = "dashed") +
+  scale_shape_manual(values=c(4, 19, 4, 4)) +
+  labs(x = "Mother concentration",  
+       y = "Offspring concentration") +
+  theme_classic() + theme(legend.position = "none")
+p3
+dev.off()
+
+ 
+grid.arrange(p1,p2, p3, nrow=3)
+
+
+# save datasets for later analysis and plotting
+# need to save the datasets
+datasets_censored = list(Ycens = df_cens1,
+                         Xcens = df_cens2,
+                         XYcens = df_cens3)
+save(datasets_censored,
+     file = paste0(dir.modelruns, "datasets_censored_", Sys.Date(),".RData"))
+```
+
+```{r Data, include=FALSE}
+
+## Data
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# data organised for JAGS - posterior sampling
+
+# for the 1st analysis, using only uncensored data
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+data_M1_CV1 <- list(xobs = train1$log10_Mother,      # xobs = mother (see DAG for naming of variables and parameters)
+                yobs = train1$log10_Offspring,       # yobs = Offspring
+                n = nrow(train1),                    # number of observations 
+                max = max)                           # to inform on prior
+data_M1_CV2 <- list(xobs = train2$log10_Mother,    
+                yobs = train2$log10_Offspring,  
+                n = nrow(train2),            
+                max = max)                  
+data_M1_CV3 <- list(xobs = train3$log10_Mother,     
+                yobs = train3$log10_Offspring,  
+                n = nrow(train3),               
+                max = max)  
+              
+data <- list(CV1 = data_M1_CV1,
+             CV2 = data_M1_CV2,
+             CV3 = data_M1_CV3)
+
+
+# for the 2nd analysis, including censored data
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# censoring in Y
+data_Cens_Y <- list(# Y values
+                  yobs = df_cens1[which(df_cens1$censored_Y_YN == 0), "Yobs"],  # uncensored Yobs
+                  z1   = df_cens1[which(df_cens1$censored_Y_YN == 1), "censored_Y_YN"], # type of censoring (1 = Left censored), for censored data
+                  cut1  = df_cens1[which(df_cens1$censored_Y_YN == 1), "LOD_Y"],  # detection limit, for censored data
+                  # X values
+                  xobs = df_cens1$log10_Mother, # all X values
+                  # nr. observations
+                  n = nrow(df_cens1[which(df_cens1$censored_Y_YN == 0), ]), # length of non censored data
+                  c1 = nrow(df_cens1[which(df_cens1$censored_Y_YN == 1), ]),  # length of censored data
+                  # data for prior 
+                  max = max) 
+
+# Alternative, using the dinterval() function in JAGS
+data_Cens_Y_dinterval <- list(
+                  # Y values
+                  yobs = df_cens1$Yobs,  
+                  # X values
+                  xobs = df_cens1$log10_Mother, 
+                  # nr. observations
+                  n = nrow(df_cens1[which(df_cens1$censored_Y_YN == 0), ]), # length of non censored data
+                  J = nrow(df_cens1[which(df_cens1$censored_Y_YN == 1), ]),  # length of censored data
+                  # censoring info 
+                  R = rep(0, nrow(df_cens1[which(df_cens1$censored_Y_YN == 1), ])),     # left censoring R =0
+                  lod = df_cens1[which(df_cens1$censored_Y_YN == 1), "LOD_Y"],
+                  # data for prior 
+                  max = max) 
+
+
+# censoring in X
+data_Cens_X <- list(# Y values
+                  yobs = df_cens2$log10_Offspring,  # uncensored Yobs
+                  # X values
+                  xobs = df_cens2[which(df_cens2$censored_X_YN == 0), "Xobs"], # uncensored Xobs
+                  z2   = df_cens2[which(df_cens2$censored_X_YN == 1), "censored_X_YN"], # type of censoring (1 = Left censored), for censored data
+                  cut2 = df_cens2[which(df_cens2$censored_X_YN == 1), "LOD_X"],  # detection limit, for censored data
+                  # nr. observations
+                  n = nrow(df_cens2[which(df_cens2$censored_X_YN == 0), ]), # length of non censored data
+                  c2 = nrow(df_cens2[which(df_cens2$censored_X_YN == 1), ]),  # length of censored data in X direction
+                  # data for prior 
+                  max = max) 
+
+
+# censoring in Y and X
+data_Cens_YandX <- list(
+  n = nrow(df_cens3[which(df_cens3$cens_type == "none"), ]), # length of non-censored data
+  c1 = nrow(df_cens3[which(df_cens3$cens_type == "Y only"), ]), # length of data censored in Y
+  c2 = nrow(df_cens3[which(df_cens3$cens_type == "X only"), ]), # length of data censored in X
+  c3 = nrow(df_cens3[which(df_cens3$cens_type == "both"), ]), # length of completely censored data
+  # observations - continuous variable
+  yobs = df_cens3[which(df_cens3$cens_type != "both"), "Yobs"],  # uncensored Yobs
+  xobs = df_cens3[which(df_cens3$cens_type != "both"), "Xobs"], # uncensored Xobs
+  # observations - binary variable
+  z1 = df_cens3[which(df_cens3$cens_type ==  "Y only"), "censored_Y_YN"], # type of censoring (1 = Left censored), for censored data
+  z2 = df_cens3[which(df_cens3$cens_type ==  "X only"), "censored_X_YN"], 
+  z3 = df_cens3[which(df_cens3$cens_type ==  "both"), "censored_Y_YN"], 
+  z4 = df_cens3[which(df_cens3$cens_type ==  "both"), "censored_X_YN"], 
+  # detection limits (i.e. censoring cutoffs)
+  cut1 = df_cens3[which(df_cens3$cens_type ==  "Y only"), "LOD_Y"],  # detection limit, for censored data
+  cut2 = df_cens3[which(df_cens3$cens_type ==  "X only"), "LOD_X"],
+  cut3 = df_cens3[which(df_cens3$cens_type ==  "both"), "LOD_Y"],  
+  cut4 = df_cens3[which(df_cens3$cens_type ==  "both"), "LOD_X"],
+  # data for prior
+  max = max)
+
+
+```
+
+
+```{r ReadModel, include=FALSE}
+
+## Define model
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# models for uncensored data ~~~~~~~~~~~~~~~
+# full, 6 parameter model
+modelM1a <- "M1a.txt"
+parametersM1a <- c("a", "b", "mu_x", "tau_x", "tau_y", "tau_u") # mu_x and tau_x are the population level params
+
+# reduced, 5 parameter model (equal variance on Xobsi and Xi)
+modelM1b <- "M1b.txt"
+parametersM1b <- c("a", "b", "mu_x", "tau_x", "tau")
+
+# reduced, 4 parameter model (fixed intercept)
+modelM1c <- "M1c.txt"
+parametersM1c <- c("a", "mu_x", "tau_x", "tau")
+
+
+# model incl. censored data ~~~~~~~~~~~~~~~
+# reduced, 5 parameter model for censored data
+modelM1b_cens_Y <- "M1b - censored_Y.txt" # cens in Y
+modelM1b <- "M1b - censored_Y_dinterval.txt" # Alternative: using dinterval() function in JAGS
+parametersM1b <- c("a", "b", "mu_x", "tau_x", "tau")
+modelM1b_cens_X <- "M1b - censored_X.txt" # cens in X
+modelM1b_cens_YandX <- "M1b - censored_XY.txt" # cens in X
+parametersM1b <- c("a", "b", "mu_x", "tau_x", "tau")
+
+```
+
+
+```{r Trial, include=FALSE}
+
+## Run trail model to check how long chains should be (tested on 1 CV set)
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# settings
+n_chains   <- 3
+
+
+# uncensored models 
+# -----------------------------------------------------------
+# -----------------------------------------------------------
+
+# full, 6 parameter model
+# -----------------------------------------------------------
+JagsM1a_trial <- jags(model.file = paste0(dir.jagsmodels, modelM1a),
+               parameters.to.save = parametersM1a,
+               data = data_M1_CV1,
+               # inits = initsList,
+               n.chains = n_chains,
+               n.burnin = 5000,
+               n.iter = 20000,
+               n.thin = 10)
+ChainsM1a_trial <- as.mcmc(JagsM1a_trial)
+PosteriorM1a_trial <- as.data.frame(as.matrix(ChainsM1a_trial))
+# Raftery and Lewis's diagnostic (check needed length of MCMC samples)
+RLD_M1a <- raftery.diag(PosteriorM1a_trial)
+RLD_M1a$resmatrix
+M1a_thin <- round(max(RLD_M1a$resmatrix[, "I"]) + 0.5)
+M1a_niter <- max(RLD_M1a$resmatrix[, "Nmin"]) * M1a_thin
+M1a_burnin <- max(RLD_M1a$resmatrix[, "M"])
+
+
+
+# reduced, 5 parameter model (equal variance on Xobsi and Xi)
+# -----------------------------------------------------------
+JagsM1b_trial <- jags(model.file = paste0(dir.jagsmodels, modelM1b),
+               parameters.to.save = parametersM1b,
+               data = data_M1_CV1,
+               # inits = initsList,
+               n.chains = n_chains,
+               n.burnin = 5000,
+               n.iter = 20000,
+               n.thin = 10)
+ChainsM1b_trial <- as.mcmc(JagsM1b_trial)
+PosteriorM1b_trial <- as.data.frame(as.matrix(ChainsM1b_trial))
+# Raftery and Lewis's diagnostic (check needed length of MCMC samples)
+RLD_M1b <- raftery.diag(PosteriorM1b_trial)
+RLD_M1b$resmatrix
+M1b_thin <- round(max(RLD_M1b$resmatrix[, "I"]) + 0.5)
+M1b_niter <- max(RLD_M1b$resmatrix[, "Nmin"]) * M1b_thin
+M1b_burnin <- max(RLD_M1b$resmatrix[, "M"])
+
+
+# reduced, 4 parameter model (fixed intercept)
+# -----------------------------------------------------------
+JagsM1c_trial <- jags(model.file = paste0(dir.jagsmodels, modelM1c),
+               parameters.to.save = parametersM1c,
+               data = data_M1_CV1,
+               # inits = initsList,
+               n.chains = n_chains,
+               n.burnin = 5000,
+               n.iter = 20000,
+               n.thin = 10)
+ChainsM1c_trial <- as.mcmc(JagsM1c_trial)
+PosteriorM1c_trial <- as.data.frame(as.matrix(ChainsM1c_trial))
+# Raftery and Lewis's diagnostic (check needed length of MCMC samples)
+RLD_M1c <- raftery.diag(PosteriorM1c_trial)
+RLD_M1c$resmatrix
+M1c_thin <- round(max(RLD_M1c$resmatrix[, "I"]) + 0.5)
+M1c_niter <- max(RLD_M1c$resmatrix[, "Nmin"]) * M1c_thin
+M1c_burnin <- max(RLD_M1c$resmatrix[, "M"])
+
+
+# censored models 
+# -----------------------------------------------------------
+# -----------------------------------------------------------
+
+# M5 param, censored in Y
+# -----------------------------------------------------------
+JagsM1b_cens_Y_trial <- jags(model.file = paste0(dir.jagsmodels, modelM1b_cens_Y),
+               parameters.to.save = parametersM1b,
+               data = data_Cens_Y,
+               # inits = initsList,
+               n.chains = n_chains,
+               n.burnin = 5000,
+               n.iter = 20000,
+               n.thin = 10)
+ChainsM1b_cens_Y_trial <- as.mcmc(JagsM1b_cens_Y_trial)
+PosteriorM1b_cens_Y_trial <- as.data.frame(as.matrix(ChainsM1b_cens_Y_trial))
+# Raftery and Lewis's diagnostic (check needed length of MCMC samples)
+RLD_M1b_Y <- raftery.diag(PosteriorM1b_cens_Y_trial)
+RLD_M1b_Y$resmatrix
+M1b_cens_Y_thin <- round(max(RLD_M1b_Y$resmatrix[, "I"]) + 0.5)
+M1b_cens_Y_niter <- max(RLD_M1b_Y$resmatrix[, "Nmin"]) * M1b_cens_Y_thin
+M1b_cens_Y_burnin <- max(RLD_M1b_Y$resmatrix[, "M"])
+
+# Alternative using dinterval() function in JAGS
+
+
+
+
+
+
+
+# M5 param, censored in X
+# -----------------------------------------------------------
+JagsM1b_cens_X_trial <- jags(model.file = paste0(dir.jagsmodels, modelM1b_cens_X),
+               parameters.to.save = parametersM1b,
+               data = data_Cens_X,
+               # inits = initsList,
+               n.chains = n_chains,
+               n.burnin = 5000,
+               n.iter = 20000,
+               n.thin = 10)
+ChainsM1b_cens_X_trial <- as.mcmc(JagsM1b_cens_X_trial)
+PosteriorM1b_cens_X_trial <- as.data.frame(as.matrix(ChainsM1b_cens_X_trial))
+# Raftery and Lewis's diagnostic (check needed length of MCMC samples)
+RLD_M1b_X <- raftery.diag(PosteriorM1b_cens_X_trial)
+RLD_M1b_X$resmatrix
+M1b_cens_X_thin <- round(max(RLD_M1b_X$resmatrix[, "I"]) + 0.5)
+M1b_cens_X_niter <- max(RLD_M1b_X$resmatrix[, "Nmin"]) * M1b_cens_X_thin
+M1b_cens_X_burnin <- max(RLD_M1b_X$resmatrix[, "M"])
+
+
+# M5 param, censored in X and Y
+# -----------------------------------------------------------
+JagsM1b_cens_XY_trial <- jags(model.file = paste0(dir.jagsmodels, modelM1b_cens_YandX),
+               parameters.to.save = parametersM1b,
+               data = data_Cens_YandX,
+               # inits = initsList,
+               n.chains = n_chains,
+               n.burnin = 5000,
+               n.iter = 20000,
+               n.thin = 10)
+ChainsM1b_cens_XY_trial <- as.mcmc(JagsM1b_cens_XY_trial)
+PosteriorM1b_cens_XY_trial <- as.data.frame(as.matrix(ChainsM1b_cens_XY_trial))
+# Raftery and Lewis's diagnostic (check needed length of MCMC samples)
+RLD_M1b_XY <- raftery.diag(PosteriorM1b_cens_XY_trial)
+RLD_M1b_XY$resmatrix
+M1b_cens_XY_thin <- round(max(RLD_M1b_XY$resmatrix[, "I"]) + 0.5)
+M1b_cens_XY_niter <- max(RLD_M1b_XY$resmatrix[, "Nmin"]) * M1b_cens_XY_thin
+M1b_cens_XY_burnin <- max(RLD_M1b_XY$resmatrix[, "M"])
+
+
+```
+
+
+
+```{r PosteriorModel}
+
+# Note: this part might take some time
+
+## Run model with data -> i.e. sample the posterior distribution
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+n_chains <- 3
+
+
+# uncensored models 
+# -----------------------------------------------------------
+# -----------------------------------------------------------
+
+# full, 6 parameter model
+# -----------------------------------------------------------
+
+start <- Sys.time()
+
+JagsM1a <- list()
+for(i in 1:length(data)){
+  JagsM1a[[i]] <- jags(model.file = paste0(dir.jagsmodels, modelM1a),
+                     parameters.to.save = parametersM1a,
+                     data = data[[i]],
+                     # inits = initsList,
+                     n.chains = n_chains,
+                     n.burnin = max(100, round(M1a_burnin, -1) *3),  
+                     n.iter = round(M1a_niter, -1) *3,   
+                     n.thin = 10)
+}
+
+time.elapsed <- Sys.time() - start
+time.elapsed
+
+save(JagsM1a,
+      file = paste0(dir.modelruns, "runs_M1a_", Sys.Date(),".RData"))
+
+
+
+# reduced, 5 parameter model (equal variance on Xobsi and Xi)
+# -----------------------------------------------------------
+
+start <- Sys.time()
+
+JagsM1b <- list()
+for(i in 1:length(data)){
+  JagsM1b[[i]] <- jags(model.file = paste0(dir.jagsmodels, modelM1b),
+                     parameters.to.save = parametersM1b,
+                     data = data[[i]],
+                     # inits = initsList,
+                     n.chains = n_chains,
+                     n.burnin = max(100, round(M1b_burnin, -1) *3),  
+                     n.iter = round(M1b_niter, -1) *3,   
+                     n.thin = 10)
+}
+
+time.elapsed <- Sys.time() - start
+time.elapsed
+
+save(JagsM1b,
+      file = paste0(dir.modelruns, "runs_M1b_", Sys.Date(),".RData"))
+
+
+# reduced, 4 parameter model (fixed intercept)
+# -----------------------------------------------------------
+
+start <- Sys.time()
+
+JagsM1c <- list()
+for(i in 1:length(data)){
+  JagsM1c[[i]] <- jags(model.file = paste0(dir.jagsmodels, modelM1c),
+                     parameters.to.save = parametersM1c,
+                     data = data[[i]],
+                     # inits = initsList,
+                     n.chains = n_chains,
+                     n.burnin = max(100, round(M1c_burnin, -1) *3),  
+                     n.iter = round(M1c_niter, -1) *3,   
+                     n.thin = 10)
+}
+
+time.elapsed <- Sys.time() - start
+time.elapsed
+
+save(JagsM1c,
+      file = paste0(dir.modelruns, "runs_M1c_", Sys.Date(),".RData"))
+
+
+# censored models 
+# -----------------------------------------------------------
+# -----------------------------------------------------------
+
+# M5 param, censored in Y
+# -----------------------------------------------------------
+start <- Sys.time()
+JagsM1b_cens_Y <- jags(model.file = paste0(dir.jagsmodels, modelM1b_cens_Y),
+                       parameters.to.save = parametersM1b,
+                       data = data_Cens_Y,
+                       # inits = initsList,
+                       n.chains = n_chains,
+                       n.burnin = max(100, round(M1b_cens_Y_burnin, -1) *3),  
+                       n.iter = round(M1b_cens_Y_niter, -1) *3,   
+                       n.thin = 10)
+time.elapsed <- Sys.time() - start
+time.elapsed
+
+save(JagsM1b_cens_Y,
+      file = paste0(dir.modelruns, "runs_M1b_cens_Y_", Sys.Date(),".RData"))
+
+
+# M5 param, censored in X
+# -----------------------------------------------------------
+start <- Sys.time()
+JagsM1b_cens_X <- jags(model.file = paste0(dir.jagsmodels, modelM1b_cens_X),
+                       parameters.to.save = parametersM1b,
+                       data = data_Cens_X,
+                       # inits = initsList,
+                       n.chains = n_chains,
+                       n.burnin = max(100, round(M1b_cens_X_burnin, -1) *3),  
+                       n.iter = round(M1b_cens_X_niter, -1) *3,   
+                       n.thin = 10)
+time.elapsed <- Sys.time() - start
+time.elapsed
+
+save(JagsM1b_cens_X,
+      file = paste0(dir.modelruns, "runs_M1b_cens_X_", Sys.Date(),".RData"))
+
+# M5 param, censored in Y and X
+# -----------------------------------------------------------
+
+start <- Sys.time()
+JagsM1b_cens_XY <- jags(model.file = paste0(dir.jagsmodels, modelM1b_cens_YandX),
+                       parameters.to.save = parametersM1b,
+                       data = data_Cens_YandX,
+                       # inits = initsList,
+                       n.chains = n_chains,
+                       n.burnin = max(100, round(M1b_cens_XY_burnin, -1) *3),  
+                       n.iter = round(M1b_cens_XY_niter, -1) *3,   
+                       n.thin = 10)
+time.elapsed <- Sys.time() - start
+time.elapsed
+
+save(JagsM1b_cens_XY,
+      file = paste0(dir.modelruns, "runs_M1b_cens_XY_", Sys.Date(),".RData"))
+
+
+```
+
+```{r CompareModels, echo = TRUE}
+
+## Compare models: wAIC 
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# wAIC = Watanabe-Akaike information criterion aka. widely applicable
+# information criterion the model with lower wAIC is preferred
+# based on example from Olivier Gimenez 
+
+# uncensored models 
+# -----------------------------------------------------------
+# -----------------------------------------------------------
+# full, 6 parameter model
+# ----------------------------------------------------------
+
+# get WAIC
+summarysM1a <- list()
+for(i in 1:length(data)){
+  samples <- jags.samples(JagsM1a[[i]]$model,
+                                  c("WAIC","deviance"),
+                                  type = "mean",
+                                  n.iter = 5000,
+                                  n.burnin = 1000,
+                                  n.thin = 1)
+  samples$p_waic <- samples$WAIC
+  samples$waic <- samples$deviance + samples$p_waic
+  summarysM1a[[i]] <- sapply(samples, sum)
+}
+
+summarysM1a
+waic_M1a <- c(summarysM1a[[1]][["waic"]], summarysM1a[[2]][["waic"]], summarysM1a[[3]][["waic"]])
+cat("wAIC Mean: ", mean(waic_M1a), "Sd: ", sd(waic_M1a))
+pwaic_M1a <- c(summarysM1a[[1]][["p_waic"]], summarysM1a[[2]][["p_waic"]], summarysM1a[[3]][["p_waic"]])
+cat("p_wAIC Mean: ", mean(pwaic_M1a), "Sd: ", sd(pwaic_M1a))
+deviance_M1a <- c(summarysM1a[[1]][["deviance"]], summarysM1a[[2]][["deviance"]], summarysM1a[[3]][["deviance"]])
+cat("deviance Mean: ", mean(deviance_M1a), "Sd: ", sd(deviance_M1a))
+
+
+# gelman diagnostic
+gd1 <- gelman.diag(as.mcmc(JagsM1a[[1]]))
+gd1 <- gd1$psrf[c("a", "mu_x", "tau_x", "tau_y", "b", "tau_u"),]
+gd2 <- gelman.diag(as.mcmc(JagsM1a[[2]]))
+gd2 <- gd2$psrf[c("a", "mu_x", "tau_x", "tau_y", "b", "tau_u"),]
+gd3 <- gelman.diag(as.mcmc(JagsM1a[[3]]))
+gd3 <- gd3$psrf[c("a", "mu_x", "tau_x", "tau_y", "b", "tau_u"),]
+
+res <- data.frame(CV1 = gd1[,"Point est."],
+                  CV2 = gd2[,"Point est."],
+                  CV3 = gd3[,"Point est."])
+apply(res, 1, mean)
+
+# reduced, 5 parameter model (equal variance on Xobsi and Xi)
+# ----------------------------------------------------------
+
+
+# get WAIC
+summarysM1b <- list()
+for(i in 1:length(data)){
+  samples <- jags.samples(JagsM1b[[i]]$model,
+                                  c("WAIC","deviance"),
+                                  type = "mean",
+                                  n.iter = 5000,
+                                  n.burnin = 1000,
+                                  n.thin = 1)
+  samples$p_waic <- samples$WAIC
+  samples$waic <- samples$deviance + samples$p_waic
+  summarysM1b[[i]] <- sapply(samples, sum)
+}
+
+summarysM1b
+waic_M1b <- c(summarysM1b[[1]][["waic"]], summarysM1b[[2]][["waic"]], summarysM1b[[3]][["waic"]])
+cat("wAIC Mean: ", mean(waic_M1b), "Sd: ", sd(waic_M1b))
+pwaic_M1b <- c(summarysM1b[[1]][["p_waic"]], summarysM1b[[2]][["p_waic"]], summarysM1b[[3]][["p_waic"]])
+cat("p_wAIC Mean: ", mean(pwaic_M1b), "Sd: ", sd(pwaic_M1b))
+deviance_M1b <- c(summarysM1b[[1]][["deviance"]], summarysM1b[[2]][["deviance"]], summarysM1b[[3]][["deviance"]])
+cat("deviance Mean: ", mean(deviance_M1b), "Sd: ", sd(deviance_M1b))
+
+# gelman diagnostic
+gd1 <- gelman.diag(as.mcmc(JagsM1b[[1]]))
+gd1 <- gd1$psrf[c("a", "mu_x", "tau_x", "tau", "b"),]
+gd2 <- gelman.diag(as.mcmc(JagsM1b[[2]]))
+gd2 <- gd2$psrf[c("a", "mu_x", "tau_x", "tau", "b"),]
+gd3 <- gelman.diag(as.mcmc(JagsM1b[[3]]))
+gd3 <- gd3$psrf[c("a", "mu_x", "tau_x", "tau", "b"),]
+
+res <- data.frame(CV1 = gd1[,"Point est."],
+                  CV2 = gd2[,"Point est."],
+                  CV3 = gd3[,"Point est."])
+apply(res, 1, mean)
+
+# reduced, 4 parameter model (fixed intercept)
+# ----------------------------------------------
+
+# get WAIC
+summarysM1c <- list()
+for(i in 1:length(data)){
+  samples <- jags.samples(JagsM1c[[i]]$model,
+                                  c("WAIC","deviance"),
+                                  type = "mean",
+                                  n.iter = 5000,
+                                  n.burnin = 1000,
+                                  n.thin = 1)
+  samples$p_waic <- samples$WAIC
+  samples$waic <- samples$deviance + samples$p_waic
+  summarysM1c[[i]] <- sapply(samples, sum)
+}
+
+summarysM1c
+waic_M1c <- c(summarysM1c[[1]][["waic"]], summarysM1c[[2]][["waic"]], summarysM1c[[3]][["waic"]])
+cat("wAIC Mean: ", mean(waic_M1c), "Sd: ", sd(waic_M1c))
+pwaic_M1c <- c(summarysM1c[[1]][["p_waic"]], summarysM1c[[2]][["p_waic"]], summarysM1c[[3]][["p_waic"]])
+cat("p_wAIC Mean: ", mean(pwaic_M1c), "Sd: ", sd(pwaic_M1c))
+deviance_M1c <- c(summarysM1c[[1]][["deviance"]], summarysM1c[[2]][["deviance"]], summarysM1c[[3]][["deviance"]])
+cat("deviance Mean: ", mean(deviance_M1c), "Sd: ", sd(deviance_M1c))
+
+# gelman diagnostic
+gd1 <- gelman.diag(as.mcmc(JagsM1c[[1]]))
+gd1 <- gd1$psrf[c("a", "mu_x", "tau_x", "tau"),]
+gd2 <- gelman.diag(as.mcmc(JagsM1c[[2]]))
+gd2 <- gd2$psrf[c("a", "mu_x", "tau_x", "tau"),]
+gd3 <- gelman.diag(as.mcmc(JagsM1c[[3]]))
+gd3 <- gd3$psrf[c("a", "mu_x", "tau_x", "tau"),]
+
+res <- data.frame(CV1 = gd1[,"Point est."],
+                  CV2 = gd2[,"Point est."],
+                  CV3 = gd3[,"Point est."])
+apply(res, 1, mean)
+
+
+# censored models 
+# -----------------------------------------------------------
+# -----------------------------------------------------------
+
+# reduced, 5 parameter model  incl censored data
+# -----------------------------------------------------------
+
+# M5 param, censored in Y
+# -----------------------------------------------------------
+# gelman diagnostic
+gd <- gelman.diag(as.mcmc(JagsM1b_cens_Y))
+gd <- gd$psrf[c("a", "mu_x", "tau_x", "tau", "b"),]
+gd
+
+# M5 param, censored in X
+# -----------------------------------------------------------
+# gelman diagnostic
+gd <- gelman.diag(as.mcmc(JagsM1b_cens_X))
+gd <- gd$psrf[c("a", "mu_x", "tau_x", "tau", "b"),]
+gd
+
+# M5 param, censored in Y and X
+# -----------------------------------------------------------
+# gelman diagnostic
+gd <- gelman.diag(as.mcmc(JagsM1b_cens_XY))
+gd <- gd$psrf[c("a", "mu_x", "tau_x", "tau", "b"),]
+gd
+
+
+
+```
+
+
+

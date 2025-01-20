@@ -61,7 +61,7 @@ df_noncens <- read.csv(file = paste0(dir.data, "dataset_1.csv"))
 dim(df_noncens)
 
 # prepare data (i.e. log transform observations)
-df_noncens <- df %>%  
+df_noncens <- df_noncens %>%  
   mutate(log10_Mother = log10(Mother_concentration)) %>%          
   mutate(log10_Offspring = log10(Offspring_concentration))
 dim(df_noncens)  
