@@ -462,7 +462,7 @@ parametersM1c <- c("a", "mu_x", "tau_x", "tau")
 # model incl. censored data ~~~~~~~~~~~~~~~
 # reduced, 5 parameter model for censored data
 modelM1b_cens_Y <- "M1b - censored_Y.txt" # cens in Y
-modelM1b <- "M1b - censored_Y_dinterval.txt" # Alternative: using dinterval() function in JAGS
+modelM1b_cens_Yalt <- "M1b - censored_Y_dinterval.txt" # Alternative: using dinterval() function in JAGS
 parametersM1b <- c("a", "b", "mu_x", "tau_x", "tau")
 modelM1b_cens_X <- "M1b - censored_X.txt" # cens in X
 modelM1b_cens_YandX <- "M1b - censored_XY.txt" # cens in X
@@ -569,9 +569,21 @@ M1b_cens_Y_niter <- max(RLD_M1b_Y$resmatrix[, "Nmin"]) * M1b_cens_Y_thin
 M1b_cens_Y_burnin <- max(RLD_M1b_Y$resmatrix[, "M"])
 
 # Alternative using dinterval() function in JAGS
-
-
-
+JagsM1b_cens_Y_trialalt <- jags(model.file = paste0(dir.jagsmodels, modelM1b_cens_Yalt),
+               parameters.to.save = parametersM1b,
+               data = data_Cens_Y_dinterval,
+               # inits = initsList,
+               n.chains = n_chains,
+               n.burnin = 5000,
+               n.iter = 20000,
+               n.thin = 10)
+ChainsM1b_cens_Y_trialalt <- as.mcmc(JagsM1b_cens_Y_trialalt)
+PosteriorM1b_cens_Y_trialalt <- as.data.frame(as.matrix(ChainsM1b_cens_Y_trialalt))
+#### Note: this implementation is not further pursued, it was just presented here
+# as some users (reviewers) might use the dinterva approach. Clearly, this also works
+# we chose to align closey with the mathematical implementation presented in eqn. 2
+# of the manuscript, where the bernoulli distribution is explicitely used (hence, 
+# this alternative with "dinterval()" is not worked out bejond this point)
 
 
 
